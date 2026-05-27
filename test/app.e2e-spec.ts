@@ -22,7 +22,8 @@ describe('AppController (e2e)', () => {
       .expect(201)
       .expect((res) => {
         expect(res.body.status).toBe('success');
-        expect(res.body.message).toContain('Sprint 1 skeleton');
+        expect(res.body.discoveredCount).toBeGreaterThan(0);
+        expect(res.body.message).toContain('Discovered and processed');
       });
   });
 
