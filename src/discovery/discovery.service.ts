@@ -140,6 +140,18 @@ export class DiscoveryService {
           title: 'Lieferung von OP-Masken und Schutzkleidung',
           documentsUrl: 'https://vergabeplattform.charite.de/NetServer/TenderingProcedureDetails?id=oev-charite-6666',
           shortDescription: 'Jahresbedarf an sterilen Einweg-Schutzkleidern für Intensivstationen.',
+        },
+        {
+          id: 'oev-dtvp-1122',
+          title: 'Sanierung Schulgebäude in Hamburg-Mitte (DTVP)',
+          documentsUrl: 'https://www.dtvp.de/documents/dtvp-1122/ausschreibung.pdf',
+          shortDescription: 'Brandschutz- und Elektroarbeiten für ein denkmalgeschütztes Schulgebäude.',
+        },
+        {
+          id: 'oev-dev-1133',
+          title: 'Modernisierung Brandmeldeanlage Universität Köln (eVergabe)',
+          documentsUrl: 'https://www.deutsche-evergabe.de/documents/dev-1133/ausschreibung.pdf',
+          shortDescription: 'Lieferung und Montage von Brandmeldern und Steuerungssystemen.',
         }
       ];
 

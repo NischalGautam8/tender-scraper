@@ -61,6 +61,31 @@ export class OutputManagerService {
     }
   }
 
+  async writeAlert(
+    portal: string,
+    tenderId: string,
+    alert: any,
+  ): Promise<void> {
+    const tenderDir = await this.ensureTenderDir(portal, tenderId);
+    const destPath = path.join(tenderDir, 'alerts.json');
+    const tempPath = `${destPath}.tmp`;
+
+    try {
+      this.logger.debug({ destPath }, 'Writing alerts.json atomically');
+      const data = { alerts: [alert] };
+      fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf8');
+      fs.renameSync(tempPath, destPath);
+    } catch (error: any) {
+      this.logger.error({ destPath, error: error.message }, 'Failed to write alerts.json atomically');
+      if (fs.existsSync(tempPath)) {
+        try {
+          fs.unlinkSync(tempPath);
+        } catch {}
+      }
+      throw error;
+    }
+  }
+
   async hasProcurement(portal: string, tenderId: string): Promise<boolean> {
     const filePath = path.join(this.getTenderDir(portal, tenderId), 'procurement.json');
     return fs.existsSync(filePath) && fs.statSync(filePath).size > 0;

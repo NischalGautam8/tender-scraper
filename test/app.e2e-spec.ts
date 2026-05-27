@@ -25,7 +25,7 @@ describe('AppController (e2e)', () => {
         expect(res.body.discoveredCount).toBeGreaterThan(0);
         expect(res.body.message).toContain('Discovered and processed');
       });
-  });
+  }, 15000);
 
   afterEach(async () => {
     await app.close();

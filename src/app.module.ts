@@ -15,6 +15,10 @@ import { VergabekooperationBerlinModule } from './portals/germany/netserver/verg
 import { SachsenEvergabeModule } from './portals/germany/netserver/sachsen-evergabe/sachsen-evergabe.module';
 import { ChariteBerlinModule } from './portals/germany/netserver/charite-berlin/charite-berlin.module';
 import { NetServerCron } from './portals/germany/netserver/netserver.cron';
+import { DtvpModule } from './portals/germany/dtvp/dtvp.module';
+import { DeutscheEvergabeModule } from './portals/germany/deutsche-evergabe/deutsche-evergabe.module';
+import { DtvpCron } from './portals/germany/dtvp/dtvp.cron';
+import { DeutscheEvergabeCron } from './portals/germany/deutsche-evergabe/deutsche-evergabe.cron';
 
 @Module({
   imports: [
@@ -50,8 +54,10 @@ import { NetServerCron } from './portals/germany/netserver/netserver.cron';
     VergabekooperationBerlinModule,
     SachsenEvergabeModule,
     ChariteBerlinModule,
+    DtvpModule,
+    DeutscheEvergabeModule,
   ],
   controllers: [AppController],
-  providers: [AppService, NetServerCron],
+  providers: [AppService, NetServerCron, DtvpCron, DeutscheEvergabeCron],
 })
 export class AppModule {}

@@ -25,6 +25,8 @@ describe('AppController', () => {
         { id: '5', title: 'Tender 5', subPortalModule: 'vergabekooperation-berlin' },
         { id: '6', title: 'Tender 6', subPortalModule: 'sachsen-evergabe' },
         { id: '7', title: 'Tender 7', subPortalModule: 'charite-berlin' },
+        { id: '8', title: 'Tender 8', subPortalModule: 'dtvp' },
+        { id: '9', title: 'Tender 9', subPortalModule: 'deutsche-evergabe' },
       ]),
     };
 
@@ -58,8 +60,8 @@ describe('AppController', () => {
     it('should trigger scraping cycle and return success status with count', async () => {
       const result = await appController.runScrapers();
       expect(result.status).toBe('success');
-      expect(result.discoveredCount).toBe(7);
-      expect(result.message).toContain('Discovered and processed 7 tenders');
+      expect(result.discoveredCount).toBe(9);
+      expect(result.message).toContain('Discovered and processed 9 tenders');
     });
   });
 });
