@@ -19,6 +19,11 @@ import { DtvpModule } from './portals/germany/dtvp/dtvp.module';
 import { DeutscheEvergabeModule } from './portals/germany/deutsche-evergabe/deutsche-evergabe.module';
 import { DtvpCron } from './portals/germany/dtvp/dtvp.cron';
 import { DeutscheEvergabeCron } from './portals/germany/deutsche-evergabe/deutsche-evergabe.cron';
+import { AntiBotModule } from './shared/anti-bot/anti-bot.module';
+import { UdbudDkModule } from './portals/denmark/udbud-dk/udbud-dk.module';
+import { PlacspEsModule } from './portals/spain/placsp-es/placsp-es.module';
+import { UdbudDkCron } from './portals/denmark/udbud-dk/udbud-dk.cron';
+import { PlacspEsCron } from './portals/spain/placsp-es/placsp-es.cron';
 
 @Module({
   imports: [
@@ -46,6 +51,7 @@ import { DeutscheEvergabeCron } from './portals/germany/deutsche-evergabe/deutsc
     }),
     ScheduleModule.forRoot(),
     SharedModule,
+    AntiBotModule,
     DiscoveryModule,
     BiMedienModule,
     EvergabeDeModule,
@@ -56,8 +62,17 @@ import { DeutscheEvergabeCron } from './portals/germany/deutsche-evergabe/deutsc
     ChariteBerlinModule,
     DtvpModule,
     DeutscheEvergabeModule,
+    UdbudDkModule,
+    PlacspEsModule,
   ],
   controllers: [AppController],
-  providers: [AppService, NetServerCron, DtvpCron, DeutscheEvergabeCron],
+  providers: [
+    AppService,
+    NetServerCron,
+    DtvpCron,
+    DeutscheEvergabeCron,
+    UdbudDkCron,
+    PlacspEsCron,
+  ],
 })
 export class AppModule {}

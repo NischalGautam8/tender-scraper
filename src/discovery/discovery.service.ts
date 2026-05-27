@@ -18,6 +18,10 @@ export class DiscoveryService {
     ['vergabeplattform.charite.de', 'charite-berlin'],
     ['vergabekooperation.berlin', 'vergabekooperation-berlin'],
     ['www.evergabe.sachsen.de', 'sachsen-evergabe'],
+    ['udbud.dk', 'udbud-dk'],
+    ['www.udbud.dk', 'udbud-dk'],
+    ['contrataciondelestado.es', 'placsp-es'],
+    ['www.contrataciondelestado.es', 'placsp-es'],
   ]);
 
   constructor(
@@ -152,6 +156,18 @@ export class DiscoveryService {
           title: 'Modernisierung Brandmeldeanlage Universität Köln (eVergabe)',
           documentsUrl: 'https://www.deutsche-evergabe.de/documents/dev-1133/ausschreibung.pdf',
           shortDescription: 'Lieferung und Montage von Brandmeldern und Steuerungssystemen.',
+        },
+        {
+          id: 'oev-udbud-123',
+          title: 'IT-Kabelinfrastruktur og Fiber-udrulning',
+          documentsUrl: 'https://udbud.dk/notices/udbud-dk-123/attachment.zip',
+          shortDescription: 'Udbud vedrørende levering og etablering af struktureret kabling.',
+        },
+        {
+          id: 'oev-placsp-456',
+          title: 'Suministro de licencias de software y soporte técnico',
+          documentsUrl: 'https://contrataciondelestado.es/documents/placsp-456/pliegos.zip',
+          shortDescription: 'Servicio de mantenimiento y soporte de sistemas informáticos para el Ministerio.',
         }
       ];
 

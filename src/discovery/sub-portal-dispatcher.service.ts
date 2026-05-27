@@ -54,6 +54,8 @@ export class SubPortalDispatcherService {
       'charite-berlin': 'ChariteBerlinService',
       'vergabekooperation-berlin': 'VergabekooperationBerlinService',
       'sachsen-evergabe': 'SachsenEvergabeService',
+      'udbud-dk': 'UdbudDkService',
+      'placsp-es': 'PlacspEsService',
     };
     
     return registry[moduleName] ?? null;
