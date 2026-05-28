@@ -59,8 +59,8 @@ export class EvergabeDeService extends BaseScraperService {
           id,
           title,
           shortDescription: description || title,
-          documentsUrl: absoluteUrl.replace('/ausschreibungen/', '/unterlagen/').replace(/\/zustellweg-auswaehlen\/?$/i, ''),
-          portalUrl: absoluteUrl.replace(/\/zustellweg-auswaehlen\/?$/i, ''),
+          documentsUrl: absoluteUrl.replace('/ausschreibungen/', '/unterlagen/'),
+          portalUrl: absoluteUrl,
           estimatedValue: null,
         });
       });

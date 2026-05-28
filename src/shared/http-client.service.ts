@@ -23,8 +23,7 @@ export interface RequestOptions {
 @Injectable()
 export class HttpClientService {
   private readonly limiters = new Map<string, RateLimiter>();
-  private readonly defaultUserAgent =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  private readonly defaultUserAgent = 'Mozilla/5.0';
 
   constructor(
     private readonly config: TypedConfigService,

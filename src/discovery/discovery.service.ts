@@ -16,11 +16,16 @@ export class DiscoveryService {
     ['evergabe.de', 'evergabe-de'],
     ['www.evergabe.de', 'evergabe-de'],
     ['bi-medien.de', 'bi-medien'],
+    ['www.bi-medien.de', 'bi-medien'],
     ['vergabe.hamburgwasser.de', 'hamburg-wasser'],
+    ['www.vergabe.hamburgwasser.de', 'hamburg-wasser'],
     ['fbhh-evergabe.web.hamburg.de', 'fbhh-hamburg'],
     ['vergabeplattform.charite.de', 'charite-berlin'],
     ['vergabekooperation.berlin', 'vergabekooperation-berlin'],
+    ['evergabe.sachsen.de', 'sachsen-evergabe'],
     ['www.evergabe.sachsen.de', 'sachsen-evergabe'],
+    ['sachsen-vergabe.de', 'sachsen-evergabe'],
+    ['www.sachsen-vergabe.de', 'sachsen-evergabe'],
     ['udbud.dk', 'udbud-dk'],
     ['www.udbud.dk', 'udbud-dk'],
     ['contrataciondelestado.es', 'placsp-es'],
@@ -49,10 +54,6 @@ export class DiscoveryService {
         if (host === registeredDomain || host.endsWith('.' + registeredDomain)) {
           return mappedModule;
         }
-      }
-
-      if (host.toLowerCase().includes('netserver')) {
-        return 'sachsen-evergabe';
       }
 
       this.logger.warn({ host, url: subPortalUrl }, 'Unknown sub-portal domain, skipping dispatch');

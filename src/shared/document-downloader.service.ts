@@ -445,6 +445,32 @@ export class DocumentDownloaderService {
             const $modal = cheerio.load(modalHtml);
             const modalDocLinks: { url: string; filename?: string }[] = [];
 
+            // Check if there is a dynamic file API (like in deutsche-evergabe)
+            const fileApiUrl = $modal('#Action_dxVUFilesForSupplier').attr('data-url');
+            const baseUrlMatch = modalHtml.match(/var\s+url\s*=\s*['"](https?:\/\/[^'"]+id=)['"]/i);
+            
+            if (fileApiUrl && baseUrlMatch && baseUrlMatch[1]) {
+              const fileApiFullUrl = fileApiUrl.startsWith('http') ? fileApiUrl : new URL(fileApiUrl, urlObj.origin).toString();
+              const downloadBaseUrl = baseUrlMatch[1];
+              this.logger.info({ fileApiFullUrl, downloadBaseUrl }, 'Found dynamic file API in BekSummaryModal');
+              
+              try {
+                const fileListJson = await this.httpClient.getText(fileApiFullUrl, { timeout: 15000 });
+                const files = JSON.parse(fileListJson);
+                for (const file of files) {
+                  if (file.DokIDStr && file.TFilename) {
+                    modalDocLinks.push({
+                      url: downloadBaseUrl + file.DokIDStr,
+                      filename: file.TFilename
+                    });
+                  }
+                }
+              } catch (apiErr: any) {
+                this.logger.warn({ error: apiErr.message }, 'Failed to fetch dynamic file list from BekSummaryModal API');
+              }
+            }
+
+            // Fallback to static a[href] parsing if no dynamic API or as a supplement
             $modal('a[href]').each((_i, el) => {
               const href = $modal(el).attr('href');
               if (!href) return;
@@ -554,6 +580,49 @@ export class DocumentDownloaderService {
 
     // Special handling for evergabe.de (Vergabemarktplatz)
     if (host.includes('evergabe.de') && !host.includes('deutsche-evergabe.de')) {
+      // Fast-path: most OCDS links end with /zustellweg-auswaehlen, while the actual
+      // public documents table is available directly at /unterlagen/<id>.
+      const canonicalDocsUrl = pageUrl.replace(/\/zustellweg-auswaehlen\/?$/i, '');
+
+      if (canonicalDocsUrl !== pageUrl) {
+        this.logger.info({ pageUrl, canonicalDocsUrl }, 'evergabe.de: trying canonical documents page first');
+        try {
+          const canonicalHtml = await this.httpClient.getText(canonicalDocsUrl, {
+            ...options,
+            timeout: options.timeout ?? 20000,
+          });
+          const $canon = cheerio.load(canonicalHtml);
+          const refs: DocumentRef[] = [];
+          const seenCanon = new Set<string>();
+
+          $canon('a[href*="/download-url/"], a[href*="/portal/files/download"]').each((_i, el) => {
+            const href = $canon(el).attr('href');
+            if (!href) return;
+            try {
+              const absoluteUrl = new URL(href, canonicalDocsUrl).toString();
+              if (seenCanon.has(absoluteUrl)) return;
+              seenCanon.add(absoluteUrl);
+
+              const rowText = $canon(el).closest('tr').text();
+              const filenameMatch = rowText.match(/([^\s\\/:*?"<>|]+\.(?:pdf|zip|docx?|xlsx?|pptx?|xml|csv|txt|rtf))/i);
+              refs.push({
+                url: absoluteUrl,
+                filename: filenameMatch ? filenameMatch[1] : undefined,
+              });
+            } catch {
+              // Skip invalid absolute URL resolution
+            }
+          });
+
+          if (refs.length > 0) {
+            this.logger.info({ count: refs.length, canonicalDocsUrl }, 'evergabe.de: found download-url links on canonical page');
+            return this.downloadAllDocuments(refs, destDir, options);
+          }
+        } catch (canonErr: any) {
+          this.logger.debug({ error: canonErr.message }, 'evergabe.de canonical-page extraction failed; falling back to Playwright');
+        }
+      }
+
       this.logger.info({ pageUrl }, 'Handling evergabe.de portal via Playwright');
       let context: any;
       try {
@@ -561,53 +630,31 @@ export class DocumentDownloaderService {
         context = result.context;
         const page = result.page;
 
-        this.logger.info('Handling evergabe.de zustellweg-auswaehlen wizard');
+        this.logger.info('Handling evergabe.de access/download flow');
         // Wait for page to fully render
         await page.waitForTimeout(4000);
+        await this.dismissKnownCookieOverlays(page);
 
-        // Step 1: Select anonymous/without-registration option
-        // The wizard may use radio buttons, labels, or clickable cards
-        const anonSelectors = [
-          'label:has-text("Ohne Registrierung")',
-          'label:has-text("anonym")',
-          'span:has-text("Ohne Registrierung")',
-          'div:has-text("Ohne Registrierung") >> input[type="radio"]',
-          'input[type="radio"][value*="anonym"]',
-          'input[type="radio"][value*="without"]',
-          'label:has-text("ohne Anmeldung")',
-          '[data-testid*="anonymous"]',
-          '.radio-option:has-text("Ohne Registrierung")',
-        ];
+        // If we are on the "zustellweg-auswaehlen" page, click the actionable
+        // "Vergabeunterlagen ansehen" button/link (not just the heading text).
+        try {
+          const anonymousAccessSelectors = [
+            'a.btn.btn-primary[href*="/unterlagen/"]:has-text("Vergabeunterlagen ansehen")',
+            'a[href*="/unterlagen/"]:has-text("Vergabeunterlagen ansehen")',
+            'a:has-text("Vergabeunterlagen ansehen")',
+          ];
 
-        for (const selector of anonSelectors) {
-          try {
+          for (const selector of anonymousAccessSelectors) {
             if (await page.locator(selector).count() > 0) {
-              this.logger.info({ selector }, 'Found anonymous download option; clicking');
-              await page.locator(selector).first().click();
-              await page.waitForTimeout(1500);
+              this.logger.info({ selector }, 'evergabe.de: opening anonymous documents page');
+              await page.locator(selector).last().click({ timeout: 10000 });
+              await page.waitForTimeout(3500);
+              await this.dismissKnownCookieOverlays(page);
               break;
             }
-          } catch { /* try next selector */ }
-        }
-
-        // Step 2: Click "weiter" (continue/next) if it's a multi-step wizard
-        const continueSelectors = [
-          'button:has-text("weiter")',
-          'button:has-text("Weiter")',
-          'a:has-text("weiter")',
-          'button:has-text("Fortfahren")',
-          'button[type="submit"]',
-        ];
-
-        for (const selector of continueSelectors) {
-          try {
-            if (await page.locator(selector).count() > 0) {
-              this.logger.info({ selector }, 'Found continue/next button; clicking');
-              await page.locator(selector).first().click();
-              await page.waitForTimeout(3000);
-              break;
-            }
-          } catch { /* try next */ }
+          }
+        } catch (flowErr: any) {
+          this.logger.debug({ error: flowErr.message }, 'evergabe.de: could not click anonymous access button');
         }
 
         // Step 3: Click the download button which initiates the file download
@@ -653,18 +700,39 @@ export class DocumentDownloaderService {
         $ev('a[href]').each((_i, el) => {
           const href = $ev(el).attr('href');
           if (!href) return;
+
           let cleanHref = href;
           const semiIdx = cleanHref.indexOf(';');
           if (semiIdx !== -1) cleanHref = cleanHref.substring(0, semiIdx);
+
           const ext = path.extname(cleanHref).toLowerCase();
-          if (DOC_EXTENSIONS.has(ext)) {
+          const hrefLower = cleanHref.toLowerCase();
+          const isEvergabeDownloadUrl =
+            hrefLower.includes('/download-url/') ||
+            hrefLower.includes('/portal/files/download');
+
+          if (DOC_EXTENSIONS.has(ext) || isEvergabeDownloadUrl) {
             try {
-              const absoluteUrl = new URL(href, pageUrl).toString();
+              const absoluteUrl = new URL(href, page.url()).toString();
               if (!evSeen.has(absoluteUrl)) {
                 evSeen.add(absoluteUrl);
-                evRefs.push({ url: absoluteUrl, filename: $ev(el).text().trim() || undefined });
+
+                // Try to infer filename from row text (evergabe table lists filename in the same row)
+                let inferredFilename: string | undefined;
+                const rowText = $ev(el).closest('tr').text();
+                const filenameMatch = rowText.match(/([^\s\\/:*?"<>|]+\.(?:pdf|zip|docx?|xlsx?|pptx?|xml|csv|txt|rtf))/i);
+                if (filenameMatch) {
+                  inferredFilename = filenameMatch[1];
+                }
+
+                evRefs.push({
+                  url: absoluteUrl,
+                  filename: inferredFilename || $ev(el).text().trim() || undefined,
+                });
               }
-            } catch { /* skip invalid URLs */ }
+            } catch {
+              // skip invalid URLs
+            }
           }
         });
 
@@ -727,7 +795,15 @@ export class DocumentDownloaderService {
       }
 
       const ext = path.extname(cleanPathname).toLowerCase();
-      if (DOC_EXTENSIONS.has(ext)) {
+      const lowerAbsolute = absoluteUrl.toLowerCase();
+      const looksLikeNonExtDownload =
+        lowerAbsolute.includes('/download-url/') ||
+        lowerAbsolute.includes('/portal/files/download') ||
+        lowerAbsolute.includes('function=_download') ||
+        lowerAbsolute.includes('/download?') ||
+        lowerAbsolute.includes('downloadtoken=');
+
+      if (DOC_EXTENSIONS.has(ext) || looksLikeNonExtDownload) {
         seenUrls.add(absoluteUrl);
         let linkText = titleText?.trim();
         // Ignore generic download buttons or text that don't represent actual file names
@@ -794,6 +870,54 @@ export class DocumentDownloaderService {
   }
 
   /**
+   * Dismiss common cookie overlays that block clicks on many EU procurement portals.
+   */
+  private async dismissKnownCookieOverlays(page: any): Promise<void> {
+    const consentButtons = [
+      'button:has-text("Alle akzeptieren")',
+      'button:has-text("Akzeptieren")',
+      'button:has-text("Ich stimme zu")',
+      'button:has-text("Accept all")',
+      'button:has-text("Accept")',
+      '[aria-label*="accept" i]',
+    ];
+
+    for (const selector of consentButtons) {
+      try {
+        if (await page.locator(selector).count() > 0) {
+          await page.locator(selector).first().click({ timeout: 2000 });
+          await page.waitForTimeout(500);
+          break;
+        }
+      } catch {
+        // Continue trying other selectors
+      }
+    }
+
+    // Last resort: remove known overlay roots that intercept clicks.
+    try {
+      await page.evaluate(() => {
+        const selectors = [
+          '#usercentrics-root',
+          '#usercentrics-cmp-ui',
+          '.uc-embedding-container',
+          '.cookie-banner',
+          '.cookie-consent',
+          '.cmpbox',
+        ];
+        for (const sel of selectors) {
+          document.querySelectorAll(sel).forEach((el) => {
+            (el as HTMLElement).style.pointerEvents = 'none';
+            (el as HTMLElement).style.display = 'none';
+          });
+        }
+      });
+    } catch {
+      // Ignore DOM manipulation errors
+    }
+  }
+
+  /**
    * Playwright-based fallback for downloading documents from JS-rendered pages.
    * Used for NetServer portals and as a last resort for other portals.
    */
@@ -809,15 +933,20 @@ export class DocumentDownloaderService {
 
       // Let dynamic content load
       await page.waitForTimeout(5000);
+      await this.dismissKnownCookieOverlays(page);
 
       // Try clicking any download/zip buttons first
       const downloadBtnSelectors = [
         'a[href*=".zip"]',
         'a[href*=".pdf"]',
+        'a[href*="/download-url/"]',
+        'a[href*="/download"]',
         'button:has-text("Download")',
         'button:has-text("download")',
         'button:has-text("Herunterladen")',
         'a:has-text("Vergabeunterlagen")',
+        'a:has-text("Vergabeunterlagen ansehen")',
+        'a:has-text("Datei herunterladen")',
         'a:has-text("ZIP")',
         'a[download]',
       ];
@@ -856,9 +985,16 @@ export class DocumentDownloaderService {
         const semiIdx = cleanHref.indexOf(';');
         if (semiIdx !== -1) cleanHref = cleanHref.substring(0, semiIdx);
         const ext = path.extname(cleanHref).toLowerCase();
-        if (DOC_EXTENSIONS.has(ext)) {
+        const hrefLower = cleanHref.toLowerCase();
+        const looksLikeNonExtDownload =
+          hrefLower.includes('/download-url/') ||
+          hrefLower.includes('/portal/files/download') ||
+          hrefLower.includes('function=_download') ||
+          hrefLower.includes('/download?');
+
+        if (DOC_EXTENSIONS.has(ext) || looksLikeNonExtDownload) {
           try {
-            const absoluteUrl = new URL(href, pageUrl).toString();
+            const absoluteUrl = new URL(href, page.url()).toString();
             if (!seen.has(absoluteUrl)) {
               seen.add(absoluteUrl);
               refs.push({ url: absoluteUrl, filename: $dynamic(el).text().trim() || undefined });
