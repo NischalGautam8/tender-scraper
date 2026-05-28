@@ -5,6 +5,7 @@ import { HttpClientService } from '../../../shared/http-client.service';
 import { DocumentDownloaderService, DownloadResult } from '../../../shared/document-downloader.service';
 import { OutputManagerService } from '../../../shared/output-manager.service';
 import { CreateProcurementInput } from '../../../schema/procurement.types';
+import * as cheerio from 'cheerio';
 
 @Injectable()
 export class DeutscheEvergabeService extends BaseScraperService {
@@ -22,29 +23,63 @@ export class DeutscheEvergabeService extends BaseScraperService {
   }
 
   protected async fetchListings(): Promise<any[]> {
-    this.logger.info('Fetching listings from deutsche-evergabe.de');
-    return [
-      {
-        id: 'dev-1133',
-        title: 'Modernisierung Brandmeldeanlage Universität Köln (eVergabe)',
-        shortDescription: 'Lieferung und Montage von Brandmeldern und Steuerungssystemen.',
-        documentsUrl: 'https://www.deutsche-evergabe.de/documents/dev-1133/ausschreibung.pdf',
-        portalUrl: 'https://www.deutsche-evergabe.de/TenderingProcedureDetails?id=dev-1133',
-        estimatedValue: 140000,
-      },
-    ];
+    this.logger.info('Fetching listings from deutsche-evergabe.de (production)');
+
+    try {
+      // deutsche-evergabe.de also uses Cosinex/NetServer underneath
+      const html = await this.httpClient.getText(
+        'https://www.deutsche-evergabe.de/dashboards/dashboard_off/',
+        { timeout: 15000, maxRetries: 2 },
+      );
+
+      const $ = cheerio.load(html);
+      const listings: any[] = [];
+
+      $('a[href*="TenderingProcedureDetails"], a[href*="/dashboards/"], a[href*="/notice/"]').each((_i, el) => {
+        const href = $(el).attr('href') || '';
+        if (!href) return;
+
+        const absoluteUrl = href.startsWith('http')
+          ? href
+          : `https://www.deutsche-evergabe.de${href}`;
+
+        // Skip navigation links
+        if (absoluteUrl.endsWith('/dashboards/') || absoluteUrl.endsWith('/dashboard_off/')) return;
+
+        const idMatch = href.match(/[?&]id=([^&]+)/) || href.match(/\/([^/?]+)\/?$/);
+        const id = idMatch ? idMatch[1] : `dev-${_i}`;
+
+        const title = $(el).text().trim();
+        if (!title || title.length < 5) return;
+
+        const parent = $(el).closest('div, li, tr, article');
+        const description = parent.find('p, .description, td:nth-child(2)').first().text().trim();
+
+        listings.push({
+          id,
+          title,
+          shortDescription: description || title,
+          documentsUrl: absoluteUrl,
+          portalUrl: absoluteUrl,
+          estimatedValue: null,
+        });
+      });
+
+      this.logger.info({ listingsCount: listings.length }, 'Parsed deutsche-evergabe.de listings');
+      return listings;
+    } catch (error: any) {
+      this.logger.error({ error: error.message }, 'Failed to fetch/parse deutsche-evergabe.de listings');
+      return [];
+    }
   }
 
   protected async mapToProcurement(raw: any): Promise<CreateProcurementInput> {
-    const registrationDeadline = '2026-06-28T12:00:00Z';
-    const submissionUrl = `https://www.deutsche-evergabe.de/TenderingProcedureDetails?id=${raw.id}`;
-
     return {
       sourceArray: [
         {
           __type: 'DeutscheEvergabeSource',
           tenderExternalId: raw.id,
-          portalUrl: raw.portalUrl || submissionUrl,
+          portalUrl: raw.portalUrl,
         },
       ],
       tender: {
@@ -57,11 +92,11 @@ export class DeutscheEvergabeService extends BaseScraperService {
         estimatedValue: raw.estimatedValue
           ? { amount: raw.estimatedValue, currency: 'EUR' }
           : null,
-        cpvCodeArray: ['45312100-8'],
+        cpvCodeArray: [],
         languageCodeArray: ['de'],
         documentsUrl: raw.documentsUrl,
-        portalUrl: raw.portalUrl || submissionUrl,
-        submissionUrl: submissionUrl,
+        portalUrl: raw.portalUrl,
+        submissionUrl: raw.portalUrl,
         canBidOnIndividualLots: false,
         variantTendersAllowed: false,
         isFrameworkAgreement: false,
@@ -69,21 +104,19 @@ export class DeutscheEvergabeService extends BaseScraperService {
         subcontractingPolicy: null,
         awardCriteriaArray: [],
         submissionDetails: {
-          deadlineReceiptTenders: '2026-07-02T12:00:00Z',
-          // Hybrid signaling: Interessenten-deadline mapped to deadlineReceiptRequests
-          deadlineReceiptRequests: registrationDeadline,
+          deadlineReceiptTenders: null,
+          deadlineReceiptRequests: null,
           deadlineClarificationRequest: null,
           allowedLanguageCodeArray: ['de'],
           electronicSubmissionRequired: true,
-          // Hybrid signaling: electronicSubmissionUrl maps to self-registration URL
-          electronicSubmissionUrl: submissionUrl,
-          tenderValidityDays: 45,
-          openingDate: '2026-07-02T14:00:00Z',
-          openingPlace: 'Köln Universitätsverwaltung',
-          openingDescription: { de: 'Elektronische Angebotsöffnung.' },
+          electronicSubmissionUrl: raw.portalUrl,
+          tenderValidityDays: null,
+          openingDate: null,
+          openingPlace: null,
+          openingDescription: null,
         },
         reviewInformation: {
-          bodyName: 'Vergabekammer Rheinland',
+          bodyName: null,
           address: null,
           contact: null,
           deadlines: null,
@@ -92,26 +125,26 @@ export class DeutscheEvergabeService extends BaseScraperService {
       },
       contractingBodyArray: [
         {
-          officialName: 'Universität zu Köln',
+          officialName: 'Unknown (parsed from deutsche-evergabe)',
           nationalRegistrationNumber: null,
           location: {
-            description: 'Köln, Deutschland',
+            description: 'Deutschland',
             address: {
-              streetAddress: 'Albertus-Magnus-Platz',
-              city: 'Köln',
-              postalCode: '50923',
+              streetAddress: null,
+              city: null,
+              postalCode: null,
               country: 'Deutschland',
             },
-            nutsCodes: ['DEA23'],
+            nutsCodes: [],
           },
           contact: {
-            contactPoint: 'Dezernat Gebäude- und Sicherheitsmanagement',
-            email: 'gebaeudemanagement@verw.uni-koeln.de',
-            telephone: '+49 221 4700',
-            url: 'https://uni-koeln.de',
+            contactPoint: null,
+            email: null,
+            telephone: null,
+            url: raw.portalUrl,
           },
           organisationType: 'BODY_PUBLIC_LAW',
-          mainActivity: 'EDUCATION',
+          mainActivity: 'GENERAL_PUBLIC_SERVICES',
           isMain: true,
         },
       ],
@@ -119,30 +152,12 @@ export class DeutscheEvergabeService extends BaseScraperService {
   }
 
   protected async downloadDocuments(documentsUrl: string, destDir: string): Promise<DownloadResult> {
-    this.logger.info({ documentsUrl, destDir }, 'Downloading documents anonymously from Deutsche eVergabe');
-    const filename = 'eVergabe_Ausschreibung.pdf';
+    this.logger.info({ documentsUrl, destDir }, 'Downloading documents from Deutsche eVergabe (production)');
 
-    let filePath: string | null = null;
-    try {
-      filePath = await this.downloader.downloadFile(
-        'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf',
-        destDir,
-        filename,
-        { timeout: 5000 },
-      );
-    } catch {}
-
-    if (!filePath) {
-      const fallbackPath = require('path').join(destDir, filename);
-      require('fs').writeFileSync(fallbackPath, 'Mock Deutsche eVergabe PDF document content.', 'utf8');
-      filePath = fallbackPath;
-    }
-
-    return {
-      downloaded: filePath ? [filePath] : [],
-      failed: filePath ? [] : [documentsUrl],
-      skipped: [],
-    };
+    return this.downloader.discoverAndDownloadFromPage(documentsUrl, destDir, {
+      timeout: 20000,
+      maxRetries: 2,
+    });
   }
 
   override async processDiscoveredTender(tender: any): Promise<void> {
@@ -156,8 +171,8 @@ export class DeutscheEvergabeService extends BaseScraperService {
         severity: 'HIGH',
         portal: 'deutsche-evergabe',
         message: 'Buyer must self-register on the Interessentenliste before the deadline to participate.',
-        registrationUrl: tender.portalUrl || `https://www.deutsche-evergabe.de/TenderingProcedureDetails?id=${tender.id}`,
-        deadline: '2026-06-28T12:00:00Z', // In real life parsed from the page HTML
+        registrationUrl: tender.portalUrl || `https://www.deutsche-evergabe.de/notice/${tender.id}`,
+        deadline: null, // Will be parsed from the real page in future iterations
         detectedAt: new Date().toISOString(),
       };
       

@@ -17,6 +17,7 @@ export interface RequestOptions {
   rateLimitRpm?: number;
   timeout?: number;
   followRedirects?: boolean;
+  signal?: any;
 }
 
 @Injectable()
@@ -120,10 +121,16 @@ export class HttpClientService {
           data: body,
           headers,
           responseType: responseType as any,
+          signal: options.signal,
         });
 
         return response;
       } catch (error: any) {
+        if (error.name === 'CanceledError' || error.name === 'AbortError') {
+          this.logger.error({ method, url, errorMessage: error.message }, 'Request aborted');
+          throw error;
+        }
+
         const status = error.response?.status;
         const isRetryable =
           !status || // Network errors
@@ -167,6 +174,10 @@ export class HttpClientService {
     return response.data;
   }
 
+  async getResponse<T>(url: string, options: RequestOptions = {}, responseType: 'json' | 'text' | 'stream' = 'json'): Promise<AxiosResponse<T>> {
+    return this.executeRequest<T>('GET', url, undefined, options, responseType);
+  }
+
   async getText(url: string, options: RequestOptions = {}): Promise<string> {
     const response = await this.executeRequest<string>('GET', url, undefined, options, 'text');
     return response.data;
@@ -179,11 +190,50 @@ export class HttpClientService {
 
   /**
    * Streams a file download directly to a filesystem path.
+   * Implements stall detection and overall timeout to prevent hanging.
    */
   async downloadStream(url: string, destPath: string, options: RequestOptions = {}): Promise<void> {
-    const response = await this.executeRequest<stream.Readable>('GET', url, undefined, options, 'stream');
-    const writer = fs.createWriteStream(destPath);
-    response.data.pipe(writer);
-    await finished(writer);
+    const controller = new AbortController();
+    const extendedOptions: RequestOptions = { ...options, signal: controller.signal };
+    
+    // Set a large maximum total time for downloads (e.g., 5 minutes)
+    const TOTAL_TIMEOUT_MS = 5 * 60 * 1000;
+    const STALL_TIMEOUT_MS = 30_000;
+
+    let stallTimeout: NodeJS.Timeout | null = null;
+    let writer: fs.WriteStream | null = null;
+    let readable: stream.Readable | null = null;
+
+    const killStreams = (reason: string) => {
+      const err = new Error(reason);
+      if (readable) { try { readable.destroy(err); } catch {} }
+      if (writer)   { try { writer.destroy(err); } catch {} }
+      try { controller.abort(err); } catch {}
+    };
+
+    const timeoutId = setTimeout(() => killStreams('Download total timeout exceeded (5 min)'), TOTAL_TIMEOUT_MS);
+
+    try {
+      const response = await this.executeRequest<stream.Readable>('GET', url, undefined, extendedOptions, 'stream');
+      readable = response.data;
+      writer = fs.createWriteStream(destPath);
+      
+      const resetStallTimeout = () => {
+        if (stallTimeout) clearTimeout(stallTimeout);
+        stallTimeout = setTimeout(() => killStreams('Download stalled for 30s — no data received'), STALL_TIMEOUT_MS);
+      };
+
+      resetStallTimeout();
+      readable.on('data', resetStallTimeout);
+
+      readable.pipe(writer);
+      await finished(writer);
+    } finally {
+      clearTimeout(timeoutId);
+      if (stallTimeout) clearTimeout(stallTimeout);
+      // Ensure both streams are fully destroyed and file handle released
+      if (readable) { try { readable.destroy(); } catch {} }
+      if (writer)   { try { writer.destroy(); } catch {} }
+    }
   }
 }

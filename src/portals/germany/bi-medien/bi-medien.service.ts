@@ -5,11 +5,14 @@ import { HttpClientService } from '../../../shared/http-client.service';
 import { DocumentDownloaderService, DownloadResult } from '../../../shared/document-downloader.service';
 import { OutputManagerService } from '../../../shared/output-manager.service';
 import { CreateProcurementInput } from '../../../schema/procurement.types';
+import * as cheerio from 'cheerio';
 
 @Injectable()
 export class BiMedienService extends BaseScraperService {
   readonly portalName = 'bi-medien';
   readonly locale = 'de';
+
+  private readonly searchUrl = 'https://bi-medien.de/ausschreibungsdienste/';
 
   constructor(
     httpClient: HttpClientService,
@@ -22,18 +25,56 @@ export class BiMedienService extends BaseScraperService {
   }
 
   protected async fetchListings(): Promise<any[]> {
-    this.logger.info('Fetching listings from bi-medien');
-    // Simulate fetching listings from https://bi-medien.de/ausschreibungsdienste/
-    return [
-      {
-        id: 'bi-7788',
-        title: 'Neubau KiTa-Gebäude in Elmshorn',
-        shortDescription: 'Rohbau- und Zimmererarbeiten für ein zweistöckiges Kindertagesheim.',
-        documentsUrl: 'https://bi-medien.de/documents/bi-7788/ausschreibung.pdf',
-        portalUrl: 'https://bi-medien.de/ausschreibungsdienste/details/bi-7788',
-        estimatedValue: 450000,
-      },
-    ];
+    this.logger.info({ searchUrl: this.searchUrl }, 'Fetching listings from bi-medien.de (production)');
+
+    try {
+      const html = await this.httpClient.getText(this.searchUrl, {
+        timeout: 15000,
+        maxRetries: 2,
+      });
+
+      const $ = cheerio.load(html);
+      const listings: any[] = [];
+
+      // bi-medien renders tender listings as cards/rows with links to detail pages
+      $('a[href*="/ausschreibungsdienste/"]').each((_i, el) => {
+        const href = $(el).attr('href') || '';
+        if (!href || href === this.searchUrl) return;
+
+        const absoluteUrl = href.startsWith('http')
+          ? href
+          : `https://bi-medien.de${href}`;
+
+        // Extract a tender ID from the URL path
+        const pathParts = absoluteUrl.split('/').filter(Boolean);
+        const id = pathParts[pathParts.length - 1] || `bi-${_i}`;
+
+        // Skip if it looks like a navigation/category link
+        if (id === 'ausschreibungsdienste' || id === 'tenders') return;
+
+        const title = $(el).text().trim();
+        if (!title || title.length < 5) return;
+
+        // Look for description in sibling/parent elements
+        const parent = $(el).closest('div, li, article, tr');
+        const description = parent.find('p, .description, .teaser, td:nth-child(2)').first().text().trim();
+
+        listings.push({
+          id,
+          title,
+          shortDescription: description || title,
+          documentsUrl: absoluteUrl,
+          portalUrl: absoluteUrl,
+          estimatedValue: null,
+        });
+      });
+
+      this.logger.info({ listingsCount: listings.length }, 'Parsed bi-medien listings');
+      return listings;
+    } catch (error: any) {
+      this.logger.error({ error: error.message }, 'Failed to fetch/parse bi-medien listings page');
+      return [];
+    }
   }
 
   protected async mapToProcurement(raw: any): Promise<CreateProcurementInput> {
@@ -67,19 +108,19 @@ export class BiMedienService extends BaseScraperService {
         subcontractingPolicy: null,
         awardCriteriaArray: [],
         submissionDetails: {
-          deadlineReceiptTenders: '2026-06-15T12:00:00Z',
+          deadlineReceiptTenders: null,
           deadlineReceiptRequests: null,
           deadlineClarificationRequest: null,
           allowedLanguageCodeArray: ['de'],
           electronicSubmissionRequired: true,
           electronicSubmissionUrl: raw.portalUrl,
-          tenderValidityDays: 60,
-          openingDate: '2026-06-15T14:00:00Z',
-          openingPlace: 'Elmshorn Rathaus',
-          openingDescription: { de: 'Submission im Rathaus Zimmer 12.' },
+          tenderValidityDays: null,
+          openingDate: null,
+          openingPlace: null,
+          openingDescription: null,
         },
         reviewInformation: {
-          bodyName: 'Vergabekammer Schleswig-Holstein',
+          bodyName: null,
           address: null,
           contact: null,
           deadlines: null,
@@ -88,23 +129,23 @@ export class BiMedienService extends BaseScraperService {
       },
       contractingBodyArray: [
         {
-          officialName: 'Stadt Elmshorn',
+          officialName: 'Unknown (parsed from bi-medien)',
           nationalRegistrationNumber: null,
           location: {
-            description: 'Elmshorn, Deutschland',
+            description: 'Deutschland',
             address: {
-              streetAddress: 'Schulstraße 15',
-              city: 'Elmshorn',
-              postalCode: '25335',
+              streetAddress: null,
+              city: null,
+              postalCode: null,
               country: 'Deutschland',
             },
-            nutsCodes: ['DEF09'],
+            nutsCodes: [],
           },
           contact: {
-            contactPoint: 'Amt für Hochbau',
-            email: 'hochbau@elmshorn.de',
-            telephone: '+49 4121 2310',
-            url: 'https://elmshorn.de',
+            contactPoint: null,
+            email: null,
+            telephone: null,
+            url: raw.portalUrl,
           },
           organisationType: 'REGIONAL_AUTHORITY',
           mainActivity: 'GENERAL_PUBLIC_SERVICES',
@@ -115,36 +156,11 @@ export class BiMedienService extends BaseScraperService {
   }
 
   protected async downloadDocuments(documentsUrl: string, destDir: string): Promise<DownloadResult> {
-    this.logger.info({ documentsUrl, destDir }, 'Downloading documents from bi-medien');
-    
-    // In actual production, we hit bi-medien with HTTP GET. Here we fetch/simulate.
-    // To ensure a real document is created, we use standard downloader utility.
-    // We can query a stable public sample PDF or write a dummy text file if offline.
-    // Let's download a small sample document or write a mock document file!
-    const filename = 'Ausschreibungsunterlagen_KiTa.pdf';
-    
-    // Attempt download, otherwise write fallback file
-    let filePath: string | null = null;
-    try {
-      filePath = await this.downloader.downloadFile(
-        'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf',
-        destDir,
-        filename,
-        { timeout: 5000 },
-      );
-    } catch {}
+    this.logger.info({ documentsUrl, destDir }, 'Downloading documents from bi-medien.de (production)');
 
-    if (!filePath) {
-      // Fallback in case of offline runs (very robust!)
-      const fallbackPath = require('path').join(destDir, filename);
-      require('fs').writeFileSync(fallbackPath, 'Mock bi-medien PDF document content for KiTa Elmshorn.', 'utf8');
-      filePath = fallbackPath;
-    }
-
-    return {
-      downloaded: filePath ? [filePath] : [],
-      failed: filePath ? [] : [documentsUrl],
-      skipped: [],
-    };
+    return this.downloader.discoverAndDownloadFromPage(documentsUrl, destDir, {
+      timeout: 20000,
+      maxRetries: 2,
+    });
   }
 }

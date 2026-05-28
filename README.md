@@ -47,13 +47,32 @@ $ npx playwright install chromium
 ```
 
 ### 3. Environment Variables
-Create a `.env` file (or set these variables in your environment):
-```env
-NODE_ENV=development
-LOG_LEVEL=info
-OUTPUT_DIR=./output
-PORT=3000
-# TWO_CAPTCHA_API_KEY=your_key_here (optional)
+No `.env` file or `dotenv` package is used. All configuration is loaded directly from shell environment variables and processed via `TypedConfigService`. 
+
+Set the variables in your environment before running commands:
+
+**In Windows PowerShell:**
+```powershell
+$env:NODE_ENV="development"
+$env:LOG_LEVEL="info"
+$env:OUTPUT_DIR="./output"
+$env:PORT="3000"
+```
+
+**In Windows Command Prompt (cmd):**
+```cmd
+set NODE_ENV=development
+set LOG_LEVEL=info
+set OUTPUT_DIR=./output
+set PORT=3000
+```
+
+**In Linux/macOS:**
+```bash
+export NODE_ENV=development
+export LOG_LEVEL=info
+export OUTPUT_DIR=./output
+export PORT=3000
 ```
 
 ---

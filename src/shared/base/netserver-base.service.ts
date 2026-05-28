@@ -4,6 +4,7 @@ import { DocumentDownloaderService, DownloadResult } from '../document-downloade
 import { OutputManagerService } from '../output-manager.service';
 import { PinoLogger } from 'nestjs-pino';
 import { CreateProcurementInput } from '../../schema/procurement.types';
+import * as cheerio from 'cheerio';
 
 /**
  * Abstract base class for all Cosinex/NetServer-based portals.
@@ -26,73 +27,106 @@ export abstract class NetServerBaseService extends BaseScraperService {
 
   /**
    * Fetches publication search results from the Cosinex/NetServer portal.
+   * Parses the search results HTML table to extract real tender listings.
    */
   protected async fetchListings(): Promise<any[]> {
     const searchUrl = `${this.baseUrl}/PublicationSearchControllerServlet`;
-    this.logger.info({ searchUrl }, 'Fetching publications from NetServer');
+    this.logger.info({ searchUrl }, 'Fetching publications from NetServer (production)');
 
     try {
-      // In production, we execute GET/POST search queries and parse the HTML table.
-      // Here we implement a fully robust implementation with a fallback mock
-      // that models the exact schema of Cosinex-based publications.
-      const htmlContent = await this.httpClient.getText(searchUrl, { timeout: 10000, maxRetries: 1 });
-      this.logger.debug({ htmlLength: htmlContent.length }, 'Successfully fetched NetServer search page HTML');
-      
-      // In a real run, we would parse with Cheerio:
-      // const $ = cheerio.load(htmlContent);
-      // const rows = $('.table-search-results tr');
-      // ... parse rows ...
-    } catch (error: any) {
-      this.logger.warn(
-        { error: error.message },
-        `NetServer search endpoint is unreachable or returned an error. Using robust publication simulator.`,
-      );
-    }
+      const htmlContent = await this.httpClient.getText(searchUrl, {
+        timeout: 15000,
+        maxRetries: 2,
+      });
+      this.logger.info({ htmlLength: htmlContent.length }, 'Fetched NetServer search page HTML');
 
-    // Return mock results modeling real Cosinex listings
-    return [
-      {
-        id: `${this.portalName}-99`,
-        title: `NetServer-Vergabe: Modernisierung der Netzinfrastruktur (${this.portalName})`,
-        shortDescription: `Ausbau des Glasfasernetzes und Lieferung von aktiven Netzwerkkomponenten für das Vergabevorhaben der ${this.portalName}.`,
-        documentsUrl: `${this.baseUrl}/TenderingProcedureDetails?id=${this.portalName}-99&action=download`,
-        portalUrl: `${this.baseUrl}/TenderingProcedureDetails?id=${this.portalName}-99`,
-        estimatedValue: 280000,
-      },
-    ];
+      const $ = cheerio.load(htmlContent);
+      const listings: any[] = [];
+
+      // NetServer portals render search results in table rows with class
+      // 'publicationListRow' or within '#publicationList tbody tr'
+      const rows = $('table.list tbody tr, #publicationList tbody tr, .publicationListRow, table tr[data-id]');
+
+      if (rows.length === 0) {
+        // Fallback: look for generic table rows containing links
+        $('table tr').each((_i, row) => {
+          const link = $(row).find('a[href*="TenderingProcedureDetails"]');
+          if (link.length === 0) return;
+
+          const href = link.attr('href') || '';
+          const fullUrl = href.startsWith('http') ? href : `${this.baseUrl}/${href.replace(/^\/+/, '')}`;
+
+          // Extract ID from URL query parameter
+          const idMatch = href.match(/[?&]id=([^&]+)/);
+          const id = idMatch ? idMatch[1] : `${this.portalName}-${_i}`;
+
+          const cells = $(row).find('td');
+          const title = link.text().trim() || cells.eq(0).text().trim() || `Tender ${id}`;
+          const description = cells.eq(1)?.text().trim() || '';
+
+          listings.push({
+            id,
+            title,
+            shortDescription: description || title,
+            documentsUrl: fullUrl,
+            portalUrl: fullUrl,
+            estimatedValue: null,
+          });
+        });
+      } else {
+        rows.each((_i, row) => {
+          const $row = $(row);
+          const link = $row.find('a[href*="TenderingProcedureDetails"]').first();
+          const href = link.attr('href') || '';
+
+          if (!href) return;
+
+          const fullUrl = href.startsWith('http') ? href : `${this.baseUrl}/${href.replace(/^\/+/, '')}`;
+          const idMatch = href.match(/[?&]id=([^&]+)/);
+          const id = $row.attr('data-id') || (idMatch ? idMatch[1] : `${this.portalName}-${_i}`);
+
+          const title = link.text().trim() ||
+            $row.find('.publicationTitle, .title, td:first-child').text().trim() ||
+            `Tender ${id}`;
+
+          const description = $row.find('.publicationDescription, .description, td:nth-child(2)').text().trim();
+
+          listings.push({
+            id,
+            title,
+            shortDescription: description || title,
+            documentsUrl: fullUrl,
+            portalUrl: fullUrl,
+            estimatedValue: null,
+          });
+        });
+      }
+
+      this.logger.info(
+        { listingsCount: listings.length, portalName: this.portalName },
+        'Parsed NetServer publication listings',
+      );
+
+      return listings;
+    } catch (error: any) {
+      this.logger.error(
+        { error: error.message, searchUrl },
+        'Failed to fetch or parse NetServer search page',
+      );
+      return [];
+    }
   }
 
   /**
    * Downloads attachments from a Cosinex/NetServer detail endpoint.
+   * Fetches the tender detail page, discovers download links, and downloads them.
    */
   protected async downloadDocuments(documentsUrl: string, destDir: string): Promise<DownloadResult> {
-    this.logger.info({ documentsUrl, destDir }, 'Downloading attachments from NetServer portal');
-    const filename = 'NetServer_Vergabeunterlagen.zip';
+    this.logger.info({ documentsUrl, destDir }, 'Downloading attachments from NetServer portal (production)');
 
-    let filePath: string | null = null;
-    try {
-      filePath = await this.downloader.downloadFile(
-        'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf',
-        destDir,
-        filename,
-        { timeout: 5000 },
-      );
-    } catch {}
-
-    if (!filePath) {
-      const fallbackPath = require('path').join(destDir, filename);
-      require('fs').writeFileSync(
-        fallbackPath,
-        `Mock NetServer ZIP document content for portal ${this.portalName}.`,
-        'utf8',
-      );
-      filePath = fallbackPath;
-    }
-
-    return {
-      downloaded: filePath ? [filePath] : [],
-      failed: filePath ? [] : [documentsUrl],
-      skipped: [],
-    };
+    return this.downloader.discoverAndDownloadFromPage(documentsUrl, destDir, {
+      timeout: 20000,
+      maxRetries: 2,
+    });
   }
 }

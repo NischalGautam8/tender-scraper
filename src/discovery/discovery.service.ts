@@ -2,6 +2,9 @@ import { Injectable } from '@nestjs/common';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 import { HttpClientService } from '../shared/http-client.service';
 import { DiscoveredTender } from './oev-api.types';
+import AdmZip from 'adm-zip';
+import * as path from 'path';
+import * as fs from 'fs';
 
 @Injectable()
 export class DiscoveryService {
@@ -61,133 +64,126 @@ export class DiscoveryService {
   }
 
   /**
-   * Fetches notices from the öffentlichevergabe.de API.
-   * Standardized implementation with resilient fallback to mock data
-   * if the portal API is down or not yet accessible.
+   * Fetches notices from the öffentlichevergabe.de OpenData API.
+   * Paginates through all available pages up to a cap.
+   * No mock fallback — production only.
    */
   async discoverAll(): Promise<DiscoveredTender[]> {
-    this.logger.info('Starting öffentlichevergabe.de API discovery');
+    this.logger.info('Starting öffentlichevergabe.de exports API discovery (production mode)');
     const discovered: DiscoveredTender[] = [];
+    const daysToFetch = 3;
 
-    try {
-      const response = await this.httpClient.get<any>(
-        'https://oeffentlichevergabe.de/api/opendata/v1/notices?page=0&size=50',
-        { timeout: 10000, maxRetries: 1 }
-      );
-      
-      if (response && Array.isArray(response.content)) {
-        this.logger.info({ count: response.content.length }, 'Discovered notices from public API');
+    // Make sure output/ directory exists
+    const outputDir = path.join(process.cwd(), 'output');
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+
+    for (let i = 1; i <= daysToFetch; i++) {
+      const date = new Date();
+      date.setDate(date.getDate() - i);
+      const formattedDate = date.toISOString().split('T')[0];
+
+      const apiUrl = `https://oeffentlichevergabe.de/api/notice-exports?pubDay=${formattedDate}&format=ocds.zip`;
+      const tempZipPath = path.join(outputDir, `temp-ocds-${formattedDate}-${Date.now()}.zip`);
+
+      this.logger.info({ formattedDate, apiUrl }, 'Downloading bulk notice export from öV API');
+
+      try {
+        await this.httpClient.downloadStream(apiUrl, tempZipPath);
         
-        for (const notice of response.content) {
-          const documentsUrl = notice.documentsUrl || notice.tenderingTerms?.documentsReference?.uri;
-          if (!documentsUrl) continue;
-
-          const moduleName = this.resolveSubPortal(documentsUrl);
-          if (!moduleName) continue;
-
-          discovered.push({
-            id: notice.id || notice.noticeId,
-            title: notice.title || notice.procurementProject?.name || 'Untitled Notice',
-            shortDescription: notice.shortDescription || notice.procurementProject?.description,
-            documentsUrl,
-            portalUrl: notice.portalUrl || `https://oeffentlichevergabe.de/notice/${notice.id}`,
-            subPortalModule: moduleName,
-            rawResponse: notice,
-          });
+        if (!fs.existsSync(tempZipPath) || fs.statSync(tempZipPath).size === 0) {
+          this.logger.warn({ formattedDate }, 'Downloaded ZIP file is empty or missing');
+          continue;
         }
-      }
-    } catch (error: any) {
-      this.logger.warn(
-        { error: error.message },
-        'öffentlichevergabe.de API is currently offline or unreachable. Initializing robust fallback with mock data for assessment pipeline.',
-      );
 
-      const mockNotices = [
-        {
-          id: 'oev-bi-1234',
-          title: 'Tiefbauarbeiten für Kanalnetz Hamburg-Nord',
-          documentsUrl: 'https://bi-medien.de/ausschreibungsdienste/tenders/oev-bi-1234',
-          shortDescription: 'Straßenbau- und Entwässerungsarbeiten im Stadtgebiet Hamburg.',
-        },
-        {
-          id: 'oev-ev-5678',
-          title: 'Lieferung von Büromöbeln für das Landratsamt',
-          documentsUrl: 'https://www.evergabe.de/unterlagen/oev-ev-5678/zustellweg-auswaehlen',
-          shortDescription: 'Lieferung und Montage von ergonomischen Bürostühlen und Tischen.',
-        },
-        {
-          id: 'oev-fbhh-9012',
-          title: 'Gebäudereinigung für Schulen in Altona',
-          documentsUrl: 'https://fbhh-evergabe.web.hamburg.de/evergabe.bieter/oev-fbhh-9012',
-          shortDescription: 'Unterhaltsreinigung für Schulgebäude und Turnhallen.',
-        },
-        {
-          id: 'oev-hw-9999',
-          title: 'Erweiterung des Klärwerks Hamburg-Süd',
-          documentsUrl: 'https://vergabe.hamburgwasser.de/NetServer/TenderingProcedureDetails?id=oev-hw-9999',
-          shortDescription: 'Ingenieursleistungen für die Klärschlammbehandlung.',
-        },
-        {
-          id: 'oev-berlin-8888',
-          title: 'Sanierung der Bundesstraße B1 Berlin',
-          documentsUrl: 'https://vergabekooperation.berlin/NetServer/TenderingProcedureDetails?id=oev-berlin-8888',
-          shortDescription: 'Asphaltierungs- und Entwässerungsarbeiten im Berliner Osten.',
-        },
-        {
-          id: 'oev-sachsen-7777',
-          title: 'Netzwerkausbau der sächsischen Finanzämter',
-          documentsUrl: 'https://www.evergabe.sachsen.de/NetServer/TenderingProcedureDetails?id=oev-sachsen-7777',
-          shortDescription: 'Lieferung von LAN- und WLAN-Hardware inklusive Installation.',
-        },
-        {
-          id: 'oev-charite-6666',
-          title: 'Lieferung von OP-Masken und Schutzkleidung',
-          documentsUrl: 'https://vergabeplattform.charite.de/NetServer/TenderingProcedureDetails?id=oev-charite-6666',
-          shortDescription: 'Jahresbedarf an sterilen Einweg-Schutzkleidern für Intensivstationen.',
-        },
-        {
-          id: 'oev-dtvp-1122',
-          title: 'Sanierung Schulgebäude in Hamburg-Mitte (DTVP)',
-          documentsUrl: 'https://www.dtvp.de/documents/dtvp-1122/ausschreibung.pdf',
-          shortDescription: 'Brandschutz- und Elektroarbeiten für ein denkmalgeschütztes Schulgebäude.',
-        },
-        {
-          id: 'oev-dev-1133',
-          title: 'Modernisierung Brandmeldeanlage Universität Köln (eVergabe)',
-          documentsUrl: 'https://www.deutsche-evergabe.de/documents/dev-1133/ausschreibung.pdf',
-          shortDescription: 'Lieferung und Montage von Brandmeldern und Steuerungssystemen.',
-        },
-        {
-          id: 'oev-udbud-123',
-          title: 'IT-Kabelinfrastruktur og Fiber-udrulning',
-          documentsUrl: 'https://udbud.dk/notices/udbud-dk-123/attachment.zip',
-          shortDescription: 'Udbud vedrørende levering og etablering af struktureret kabling.',
-        },
-        {
-          id: 'oev-placsp-456',
-          title: 'Suministro de licencias de software y soporte técnico',
-          documentsUrl: 'https://contrataciondelestado.es/documents/placsp-456/pliegos.zip',
-          shortDescription: 'Servicio de mantenimiento y soporte de sistemas informáticos para el Ministerio.',
+        this.logger.info({ formattedDate }, 'Extracting and parsing OCDS ZIP export');
+        const zip = new AdmZip(tempZipPath);
+        const zipEntries = zip.getEntries();
+        let dayDiscoveredCount = 0;
+
+        for (const entry of zipEntries) {
+          if (!entry.entryName.endsWith('.json')) {
+            continue;
+          }
+
+          try {
+            const contentText = entry.getData().toString('utf8');
+            const parsed = JSON.parse(contentText);
+            
+            if (!parsed || !Array.isArray(parsed.releases)) {
+              continue;
+            }
+
+            for (const release of parsed.releases) {
+              const tender = release.tender;
+              if (!tender) {
+                continue;
+              }
+
+              const id = release.id || tender.id || `notice-${Date.now()}`;
+              const title = tender.title || 'Untitled Notice';
+              const shortDescription = tender.description || '';
+
+              let documentsUrl: string | null = null;
+              if (Array.isArray(tender.documents)) {
+                // First try to find a document URL resolving to a recognized portal
+                for (const doc of tender.documents) {
+                  if (doc.url && this.resolveSubPortal(doc.url)) {
+                    documentsUrl = doc.url;
+                    break;
+                  }
+                }
+                // Fall back to first document URL if none matched a registered portal
+                if (!documentsUrl && tender.documents.length > 0) {
+                  documentsUrl = tender.documents[0].url || null;
+                }
+              }
+
+              if (!documentsUrl) {
+                this.logger.debug({ noticeId: id }, 'Skipping notice without documents URL');
+                continue;
+              }
+
+              const moduleName = this.resolveSubPortal(documentsUrl);
+              if (!moduleName) {
+                continue;
+              }
+
+              discovered.push({
+                id,
+                title,
+                shortDescription,
+                documentsUrl,
+                portalUrl: documentsUrl,
+                subPortalModule: moduleName,
+                rawResponse: release,
+              });
+              dayDiscoveredCount++;
+            }
+          } catch (entryError: any) {
+            this.logger.warn({ entryName: entry.entryName, error: entryError.message }, 'Failed to parse ZIP entry json');
+          }
         }
-      ];
 
-      for (const notice of mockNotices) {
-        const moduleName = this.resolveSubPortal(notice.documentsUrl);
-        if (moduleName) {
-          discovered.push({
-            id: notice.id,
-            title: notice.title,
-            shortDescription: notice.shortDescription,
-            documentsUrl: notice.documentsUrl,
-            portalUrl: `https://oeffentlichevergabe.de/notice/${notice.id}`,
-            subPortalModule: moduleName,
-            rawResponse: notice,
-          });
+        this.logger.info({ formattedDate, count: dayDiscoveredCount }, 'Finished processing notices for day');
+      } catch (error: any) {
+        this.logger.warn(
+          { formattedDate, error: error.message },
+          'Failed to fetch or process notice export for day',
+        );
+      } finally {
+        try {
+          if (fs.existsSync(tempZipPath)) {
+            fs.unlinkSync(tempZipPath);
+          }
+        } catch (cleanupError: any) {
+          this.logger.error({ tempZipPath, error: cleanupError.message }, 'Failed to clean up temp ZIP file');
         }
       }
     }
 
-    this.logger.info({ discoveredCount: discovered.length }, 'Discovery complete');
+    this.logger.info({ discoveredCount: discovered.length }, 'Discovery complete (production)');
     return discovered;
   }
 }

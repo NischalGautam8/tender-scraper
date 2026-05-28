@@ -5,11 +5,14 @@ import { HttpClientService } from '../../../shared/http-client.service';
 import { DocumentDownloaderService, DownloadResult } from '../../../shared/document-downloader.service';
 import { OutputManagerService } from '../../../shared/output-manager.service';
 import { CreateProcurementInput } from '../../../schema/procurement.types';
+import * as cheerio from 'cheerio';
 
 @Injectable()
 export class DtvpService extends BaseScraperService {
   readonly portalName = 'dtvp';
   readonly locale = 'de';
+
+  private readonly searchUrl = 'https://www.dtvp.de/Center/notice/CXP4Y0S';
 
   constructor(
     httpClient: HttpClientService,
@@ -22,29 +25,60 @@ export class DtvpService extends BaseScraperService {
   }
 
   protected async fetchListings(): Promise<any[]> {
-    this.logger.info('Fetching listings from dtvp.de');
-    return [
-      {
-        id: 'dtvp-1122',
-        title: 'Sanierung Schulgebäude in Hamburg-Mitte (DTVP)',
-        shortDescription: 'Brandschutz- und Elektroarbeiten für ein denkmalgeschütztes Schulgebäude.',
-        documentsUrl: 'https://www.dtvp.de/documents/dtvp-1122/ausschreibung.pdf',
-        portalUrl: 'https://www.dtvp.de/TenderingProcedureDetails?id=dtvp-1122',
-        estimatedValue: 600000,
-      },
-    ];
+    this.logger.info({ searchUrl: this.searchUrl }, 'Fetching listings from dtvp.de (production)');
+
+    try {
+      // DTVP uses the Subreport/Cosinex platform; try the search page
+      const html = await this.httpClient.getText('https://www.dtvp.de/Center/', {
+        timeout: 15000,
+        maxRetries: 2,
+      });
+
+      const $ = cheerio.load(html);
+      const listings: any[] = [];
+
+      $('a[href*="/Center/notice/"], a[href*="TenderingProcedureDetails"]').each((_i, el) => {
+        const href = $(el).attr('href') || '';
+        if (!href) return;
+
+        const absoluteUrl = href.startsWith('http')
+          ? href
+          : `https://www.dtvp.de${href}`;
+
+        const pathParts = absoluteUrl.split('/').filter(Boolean);
+        const id = pathParts[pathParts.length - 1] || `dtvp-${_i}`;
+
+        const title = $(el).text().trim();
+        if (!title || title.length < 5) return;
+
+        const parent = $(el).closest('div, li, tr, article');
+        const description = parent.find('p, .description, td:nth-child(2)').first().text().trim();
+
+        listings.push({
+          id,
+          title,
+          shortDescription: description || title,
+          documentsUrl: absoluteUrl,
+          portalUrl: absoluteUrl,
+          estimatedValue: null,
+        });
+      });
+
+      this.logger.info({ listingsCount: listings.length }, 'Parsed dtvp.de listings');
+      return listings;
+    } catch (error: any) {
+      this.logger.error({ error: error.message }, 'Failed to fetch/parse dtvp.de listings');
+      return [];
+    }
   }
 
   protected async mapToProcurement(raw: any): Promise<CreateProcurementInput> {
-    const registrationDeadline = '2026-06-25T12:00:00Z';
-    const submissionUrl = `https://www.dtvp.de/TenderingProcedureDetails?id=${raw.id}`;
-
     return {
       sourceArray: [
         {
           __type: 'DtvpSource',
           tenderExternalId: raw.id,
-          portalUrl: raw.portalUrl || submissionUrl,
+          portalUrl: raw.portalUrl,
         },
       ],
       tender: {
@@ -57,11 +91,11 @@ export class DtvpService extends BaseScraperService {
         estimatedValue: raw.estimatedValue
           ? { amount: raw.estimatedValue, currency: 'EUR' }
           : null,
-        cpvCodeArray: ['45311000-0'],
+        cpvCodeArray: [],
         languageCodeArray: ['de'],
         documentsUrl: raw.documentsUrl,
-        portalUrl: raw.portalUrl || submissionUrl,
-        submissionUrl: submissionUrl,
+        portalUrl: raw.portalUrl,
+        submissionUrl: raw.portalUrl,
         canBidOnIndividualLots: false,
         variantTendersAllowed: false,
         isFrameworkAgreement: false,
@@ -69,21 +103,19 @@ export class DtvpService extends BaseScraperService {
         subcontractingPolicy: null,
         awardCriteriaArray: [],
         submissionDetails: {
-          deadlineReceiptTenders: '2026-06-30T12:00:00Z',
-          // Hybrid signaling: Interessenten-deadline mapped to deadlineReceiptRequests
-          deadlineReceiptRequests: registrationDeadline,
+          deadlineReceiptTenders: null,
+          deadlineReceiptRequests: null,
           deadlineClarificationRequest: null,
           allowedLanguageCodeArray: ['de'],
           electronicSubmissionRequired: true,
-          // Hybrid signaling: electronicSubmissionUrl maps to self-registration URL
-          electronicSubmissionUrl: submissionUrl,
-          tenderValidityDays: 60,
-          openingDate: '2026-06-30T14:00:00Z',
-          openingPlace: 'Hamburg Schulbehörde',
-          openingDescription: { de: 'Elektronische Öffnung im Sitzungszimmer.' },
+          electronicSubmissionUrl: raw.portalUrl,
+          tenderValidityDays: null,
+          openingDate: null,
+          openingPlace: null,
+          openingDescription: null,
         },
         reviewInformation: {
-          bodyName: 'Vergabekammer Hamburg',
+          bodyName: null,
           address: null,
           contact: null,
           deadlines: null,
@@ -92,26 +124,26 @@ export class DtvpService extends BaseScraperService {
       },
       contractingBodyArray: [
         {
-          officialName: 'SBH | Schulbau Hamburg',
+          officialName: 'Unknown (parsed from DTVP)',
           nationalRegistrationNumber: null,
           location: {
-            description: 'Hamburg, Deutschland',
+            description: 'Deutschland',
             address: {
-              streetAddress: 'An der Stadthausbrücke 1',
-              city: 'Hamburg',
-              postalCode: '20355',
+              streetAddress: null,
+              city: null,
+              postalCode: null,
               country: 'Deutschland',
             },
-            nutsCodes: ['DE600'],
+            nutsCodes: [],
           },
           contact: {
-            contactPoint: 'Einkauf SBH',
-            email: 'einkauf@sbh.hamburg.de',
-            telephone: '+49 40 42823',
-            url: 'https://hamburg.de/schulbau',
+            contactPoint: null,
+            email: null,
+            telephone: null,
+            url: raw.portalUrl,
           },
           organisationType: 'BODY_PUBLIC_LAW',
-          mainActivity: 'EDUCATION',
+          mainActivity: 'GENERAL_PUBLIC_SERVICES',
           isMain: true,
         },
       ],
@@ -119,30 +151,12 @@ export class DtvpService extends BaseScraperService {
   }
 
   protected async downloadDocuments(documentsUrl: string, destDir: string): Promise<DownloadResult> {
-    this.logger.info({ documentsUrl, destDir }, 'Downloading documents anonymously from DTVP');
-    const filename = 'DTVP_Ausschreibung.pdf';
+    this.logger.info({ documentsUrl, destDir }, 'Downloading documents from DTVP (production)');
 
-    let filePath: string | null = null;
-    try {
-      filePath = await this.downloader.downloadFile(
-        'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf',
-        destDir,
-        filename,
-        { timeout: 5000 },
-      );
-    } catch {}
-
-    if (!filePath) {
-      const fallbackPath = require('path').join(destDir, filename);
-      require('fs').writeFileSync(fallbackPath, 'Mock DTVP PDF tender document content.', 'utf8');
-      filePath = fallbackPath;
-    }
-
-    return {
-      downloaded: filePath ? [filePath] : [],
-      failed: filePath ? [] : [documentsUrl],
-      skipped: [],
-    };
+    return this.downloader.discoverAndDownloadFromPage(documentsUrl, destDir, {
+      timeout: 20000,
+      maxRetries: 2,
+    });
   }
 
   override async processDiscoveredTender(tender: any): Promise<void> {
@@ -156,8 +170,8 @@ export class DtvpService extends BaseScraperService {
         severity: 'HIGH',
         portal: 'dtvp',
         message: 'Buyer must self-register on the Interessentenliste before the deadline to participate.',
-        registrationUrl: tender.portalUrl || `https://www.dtvp.de/TenderingProcedureDetails?id=${tender.id}`,
-        deadline: '2026-06-25T12:00:00Z', // In real life parsed from the page HTML
+        registrationUrl: tender.portalUrl || `https://www.dtvp.de/Center/notice/${tender.id}`,
+        deadline: null, // Will be parsed from the real page in future iterations
         detectedAt: new Date().toISOString(),
       };
       
