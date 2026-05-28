@@ -28,46 +28,96 @@ export class BiMedienService extends BaseScraperService {
     this.logger.info({ searchUrl: this.searchUrl }, 'Fetching listings from bi-medien.de (production)');
 
     try {
-      const html = await this.httpClient.getText(this.searchUrl, {
+      const rootHtml = await this.httpClient.getText(this.searchUrl, {
         timeout: 15000,
         maxRetries: 2,
       });
 
-      const $ = cheerio.load(html);
-      const listings: any[] = [];
+      const $root = cheerio.load(rootHtml);
 
-      // bi-medien renders tender listings as cards/rows with links to detail pages
-      $('a[href*="/ausschreibungsdienste/"]').each((_i, el) => {
-        const href = $(el).attr('href') || '';
-        if (!href || href === this.searchUrl) return;
+      // Only crawl concrete listing category pages. The root page contains many
+      // navigation links that are not tenders and were previously creating fake folders.
+      const categoryUrls = new Set<string>();
+      $root('a[href*="/ausschreibungsdienste/ausschreibungen/"]').each((_i, el) => {
+        const href = $root(el).attr('href') || '';
+        if (!href) return;
 
         const absoluteUrl = href.startsWith('http')
           ? href
           : `https://bi-medien.de${href}`;
 
-        // Extract a tender ID from the URL path
-        const pathParts = absoluteUrl.split('/').filter(Boolean);
-        const id = pathParts[pathParts.length - 1] || `bi-${_i}`;
-
-        // Skip if it looks like a navigation/category link
-        if (id === 'ausschreibungsdienste' || id === 'tenders') return;
-
-        const title = $(el).text().trim();
-        if (!title || title.length < 5) return;
-
-        // Look for description in sibling/parent elements
-        const parent = $(el).closest('div, li, article, tr');
-        const description = parent.find('p, .description, .teaser, td:nth-child(2)').first().text().trim();
-
-        listings.push({
-          id,
-          title,
-          shortDescription: description || title,
-          documentsUrl: absoluteUrl,
-          portalUrl: absoluteUrl,
-          estimatedValue: null,
-        });
+        // Keep first-level category pages such as:
+        // /ausschreibungsdienste/ausschreibungen/bauleistungen
+        // /ausschreibungsdienste/ausschreibungen/lieferleistungen
+        // /ausschreibungsdienste/ausschreibungen/dienstleistungen
+        // but skip region/filter/detail links here.
+        const pathName = new URL(absoluteUrl).pathname;
+        const categoryMatch = pathName.match(
+          /^\/ausschreibungsdienste\/ausschreibungen\/(bauleistungen|lieferleistungen|dienstleistungen)\/?$/i,
+        );
+        if (categoryMatch) {
+          categoryUrls.add(`https://bi-medien.de${pathName}`);
+        }
       });
+
+      if (categoryUrls.size === 0) {
+        this.logger.warn('No bi-medien category pages found; returning no listings');
+        return [];
+      }
+
+      const listings: any[] = [];
+      const seenIds = new Set<string>();
+
+      for (const categoryUrl of categoryUrls) {
+        this.logger.info({ categoryUrl }, 'Crawling bi-medien category page');
+
+        let html = '';
+        try {
+          html = await this.httpClient.getText(categoryUrl, {
+            timeout: 15000,
+            maxRetries: 2,
+          });
+        } catch (error: any) {
+          this.logger.warn({ categoryUrl, error: error.message }, 'Failed to fetch bi-medien category page');
+          continue;
+        }
+
+        const $ = cheerio.load(html);
+        $('a[href*="/ausschreibungsdienste/ausschreibungen/"]').each((_i, el) => {
+          const href = $(el).attr('href') || '';
+          if (!href) return;
+
+          const absoluteUrl = href.startsWith('http')
+            ? href
+            : `https://bi-medien.de${href}`;
+
+          const pathName = new URL(absoluteUrl).pathname;
+
+          // Real tender detail URLs on bi-medien are in the form:
+          // /ausschreibungsdienste/ausschreibungen/A461716711
+          const tenderMatch = pathName.match(/^\/ausschreibungsdienste\/ausschreibungen\/([A-Z]\d{6,})\/?$/i);
+          if (!tenderMatch) {
+            return;
+          }
+
+          const id = tenderMatch[1];
+          if (seenIds.has(id)) return;
+          seenIds.add(id);
+
+          const title = $(el).text().trim();
+          const parent = $(el).closest('div, li, article, tr');
+          const description = parent.find('p, .description, .teaser, td:nth-child(2)').first().text().trim();
+
+          listings.push({
+            id,
+            title: title || `Ausschreibung ${id}`,
+            shortDescription: description || title || `Ausschreibung ${id}`,
+            documentsUrl: absoluteUrl,
+            portalUrl: absoluteUrl,
+            estimatedValue: null,
+          });
+        });
+      }
 
       this.logger.info({ listingsCount: listings.length }, 'Parsed bi-medien listings');
       return listings;

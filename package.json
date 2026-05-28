@@ -13,6 +13,8 @@
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
     "scrape": "nest start -- --run-once",
+    "scrape:prioritize": "nest start -- --run-once --prioritize-missing-docs",
+    "scrape:focused": "nest start -- --run-once --prioritize-missing-docs --skip-portals=evergabe-de,fbhh-hamburg,dtvp,deutsche-evergabe,vergabekooperation-berlin,sachsen-evergabe",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
     "test": "jest",
     "test:watch": "jest --watch",

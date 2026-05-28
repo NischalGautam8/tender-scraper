@@ -264,8 +264,22 @@ export class DocumentDownloaderService {
 
     // --- PORTAL SPECIFIC HANDLING ---
 
-    // Custom session/redirect hopping for Cosinex-based portals (DTVP & deutsche-evergabe)
-    if (host.includes('dtvp.de') || host.includes('deutsche-evergabe.de') || host.includes('evergabe.sachsen.de') || host.includes('hamburgwasser.de')) {
+    // bi-medien: tender detail pages often require opening the "Dokumente/Unterlagen"
+    // tab before file links become visible.
+    if (host.includes('bi-medien.de')) {
+      return this.handleBiMedienDocumentsPage(pageUrl, destDir, options);
+    }
+
+    // Custom session/redirect hopping for Cosinex/NetServer-based portals
+    if (
+      host.includes('dtvp.de') ||
+      host.includes('deutsche-evergabe.de') ||
+      host.includes('evergabe.sachsen.de') ||
+      host.includes('sachsen-vergabe.de') ||
+      host.includes('hamburgwasser.de') ||
+      host.includes('vergabekooperation.berlin') ||
+      host.includes('vergabeplattform.charite.de')
+    ) {
       this.logger.info({ pageUrl }, 'Performing cookie redirect session hopping for Cosinex portal');
       try {
         let currentUrl = pageUrl;
@@ -382,7 +396,33 @@ export class DocumentDownloaderService {
 
               if (!detailHtml) continue;
 
-              const $detail = cheerio.load(detailHtml);
+              let $detail = cheerio.load(detailHtml);
+              const updatedCookieHeader = cookies.map(c => c.split(';')[0]).join('; ');
+              let workingDetailUrl = detailFinalUrl;
+
+              // Some NetServer pages (e.g. vergabekooperation.berlin) expose a first
+              // publication page that links to a second TenderingProcedureDetails page
+              // where the actual document modal/download controls exist.
+              if ($detail('a.zipFileContents[data-oid]').length === 0) {
+                const nestedHref = $detail('a[href*="TenderingProcedureDetails"][href*="function=_Details"]').first().attr('href');
+                if (nestedHref) {
+                  try {
+                    const nestedUrl = new URL(nestedHref, workingDetailUrl).toString();
+                    if (nestedUrl !== workingDetailUrl) {
+                      this.logger.info({ nestedUrl, detailUrl }, 'Following nested NetServer tender detail link');
+                      const nestedHtml = await this.httpClient.getText(nestedUrl, {
+                        headers: { 'Cookie': updatedCookieHeader, 'Referer': workingDetailUrl },
+                        timeout: 10000,
+                      });
+                      $detail = cheerio.load(nestedHtml);
+                      workingDetailUrl = nestedUrl;
+                    }
+                  } catch (nestedErr: any) {
+                    this.logger.warn({ detailUrl, error: nestedErr.message }, 'Failed to follow nested NetServer detail link');
+                  }
+                }
+              }
+
               const detailDocLinks: { url: string; filename?: string }[] = [];
 
               $detail('a[href]').each((_i, el) => {
@@ -394,19 +434,54 @@ export class DocumentDownloaderService {
                 const ext = path.extname(cleanHref).toLowerCase();
                 if (DOC_EXTENSIONS.has(ext)) {
                   detailDocLinks.push({
-                    url: new URL(href, detailFinalUrl).toString(),
+                    url: new URL(href, workingDetailUrl).toString(),
                     filename: $detail(el).text().trim() || undefined,
                   });
                 }
               });
 
+              // NetServer/Cosinex variant: document links are generated via modal + DataProvider,
+              // and the public fallback download endpoint is _DownloadTenderDocuments&documentOID=<SpecificationVersionOID>.
+              const modalDocOidList: string[] = [];
+              $detail('a.zipFileContents[data-oid]').each((_i, el) => {
+                const oid = $detail(el).attr('data-oid');
+                if (oid) {
+                  modalDocOidList.push(oid);
+                }
+              });
+
+              if (modalDocOidList.length > 0) {
+                this.logger.info({ count: modalDocOidList.length, detailUrl }, 'Found NetServer modal document OIDs on detail page');
+                const results: DownloadResult = { downloaded: [], failed: [], skipped: [] };
+
+                for (const oid of modalDocOidList) {
+                  const downloadAllUrl = new URL(
+                    `TenderingProcedureDetails?function=_DownloadTenderDocuments&documentOID=${encodeURIComponent(oid)}`,
+                    workingDetailUrl,
+                  ).toString();
+
+                  const filePath = await this.downloadFile(downloadAllUrl, destDir, `${oid}.zip`, {
+                    headers: { 'Cookie': updatedCookieHeader, 'Referer': workingDetailUrl },
+                  });
+
+                  if (filePath) {
+                    results.downloaded.push(filePath);
+                  } else {
+                    results.failed.push(downloadAllUrl);
+                  }
+                }
+
+                if (results.downloaded.length > 0) {
+                  return results;
+                }
+              }
+
               if (detailDocLinks.length > 0) {
                 this.logger.info({ count: detailDocLinks.length, detailUrl }, 'Found downloadable files on detail page');
-                const updatedCookieHeader = cookies.map(c => c.split(';')[0]).join('; ');
                 const results: DownloadResult = { downloaded: [], failed: [], skipped: [] };
                 for (const link of detailDocLinks) {
                   const filePath = await this.downloadFile(link.url, destDir, link.filename, {
-                    headers: { 'Cookie': updatedCookieHeader, 'Referer': detailFinalUrl },
+                    headers: { 'Cookie': updatedCookieHeader, 'Referer': workingDetailUrl },
                   });
                   if (filePath) {
                     results.downloaded.push(filePath);
@@ -867,6 +942,139 @@ export class DocumentDownloaderService {
     );
 
     return this.downloadAllDocuments(documentRefs, destDir, options);
+  }
+
+  /**
+   * bi-medien specific handling.
+   * The detail URL often needs one additional click to open the documents tab.
+   */
+  private async handleBiMedienDocumentsPage(
+    pageUrl: string,
+    destDir: string,
+    options: RequestOptions = {},
+  ): Promise<DownloadResult> {
+    this.logger.info({ pageUrl }, 'Handling bi-medien portal via Playwright (documents tab flow)');
+
+    let context: any;
+    try {
+      const result = await this.browserPool.acquirePage(pageUrl);
+      context = result.context;
+      const page = result.page;
+
+      await page.waitForTimeout(3500);
+      await this.dismissKnownCookieOverlays(page);
+
+      const tabSelectors = [
+        'a:has-text("Dokumente")',
+        'a:has-text("Unterlagen")',
+        'a:has-text("Vergabeunterlagen")',
+        'button:has-text("Dokumente")',
+        'button:has-text("Unterlagen")',
+        '[role="tab"]:has-text("Dokumente")',
+        '[role="tab"]:has-text("Unterlagen")',
+      ];
+
+      for (const selector of tabSelectors) {
+        try {
+          if (await page.locator(selector).count() > 0) {
+            this.logger.info({ selector, pageUrl }, 'bi-medien: opening documents tab');
+            await page.locator(selector).first().click({ timeout: 8000 });
+            await page.waitForTimeout(2500);
+            break;
+          }
+        } catch {
+          // try next selector
+        }
+      }
+
+      // First try direct download clicks that emit a browser download event.
+      const downloadSelectors = [
+        'a[href*="download"]',
+        'a[href*="/file/"]',
+        'a[href$=".pdf"]',
+        'a[href$=".zip"]',
+        'a[href$=".doc"]',
+        'a[href$=".docx"]',
+        'a[href$=".xls"]',
+        'a[href$=".xlsx"]',
+        'a:has-text("Download")',
+        'a:has-text("Herunterladen")',
+        'button:has-text("Download")',
+        'button:has-text("Herunterladen")',
+      ];
+
+      for (const selector of downloadSelectors) {
+        try {
+          if (await page.locator(selector).count() > 0) {
+            this.logger.info({ selector, pageUrl }, 'bi-medien: attempting direct download click');
+            try {
+              const [downloadEvent] = await Promise.all([
+                page.waitForEvent('download', { timeout: 12000 }),
+                page.locator(selector).first().click(),
+              ]);
+              const savePath = path.join(destDir, downloadEvent.suggestedFilename());
+              await downloadEvent.saveAs(savePath);
+              return { downloaded: [savePath], failed: [], skipped: [] };
+            } catch {
+              // click did not trigger a browser download event; continue to DOM extraction
+            }
+          }
+        } catch {
+          // try next selector
+        }
+      }
+
+      // Fallback: collect all downloadable links from rendered DOM after tab click.
+      const html = await page.content();
+      const $ = cheerio.load(html);
+      const refs: DocumentRef[] = [];
+      const seen = new Set<string>();
+
+      $('a[href]').each((_i, el) => {
+        const href = $(el).attr('href');
+        if (!href) return;
+
+        try {
+          const absoluteUrl = new URL(href, page.url()).toString();
+          if (seen.has(absoluteUrl)) return;
+
+          let cleanPath = new URL(absoluteUrl).pathname;
+          const semiIdx = cleanPath.indexOf(';');
+          if (semiIdx !== -1) cleanPath = cleanPath.substring(0, semiIdx);
+
+          const ext = path.extname(cleanPath).toLowerCase();
+          const lower = absoluteUrl.toLowerCase();
+          const looksLikeDownload =
+            DOC_EXTENSIONS.has(ext) ||
+            lower.includes('/download') ||
+            lower.includes('downloadtoken=') ||
+            lower.includes('fileid=');
+
+          if (!looksLikeDownload) return;
+
+          seen.add(absoluteUrl);
+          refs.push({
+            url: absoluteUrl,
+            filename: $(el).text().trim() || undefined,
+          });
+        } catch {
+          // ignore invalid URLs
+        }
+      });
+
+      if (refs.length > 0) {
+        this.logger.info({ pageUrl, count: refs.length }, 'bi-medien: found document links after opening tab');
+        return this.downloadAllDocuments(refs, destDir, options);
+      }
+    } catch (error: any) {
+      this.logger.warn({ pageUrl, error: error.message }, 'bi-medien documents tab flow failed; using generic fallback');
+    } finally {
+      if (context) {
+        await this.browserPool.cleanupContext(context);
+      }
+    }
+
+    return this.playwrightDownloadFallback(pageUrl, destDir);
   }
 
   /**
