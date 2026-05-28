@@ -43,7 +43,7 @@ export class PlacspEsService extends BaseScraperService {
     try {
       // PLACSP exposes an Atom/RSS feed for recent licitaciones
       const atomUrl =
-        'https://contrataciondelestado.es/sindicacion/sindicacion_643/licitacionesPerique.atom';
+        'https://contrataciondelestado.es/sindicacion/sindicacion_643/licitacionesPerfilesContratanteCompleto3.atom';
       
       let atomXml: string;
       try {
@@ -75,19 +75,47 @@ export class PlacspEsService extends BaseScraperService {
     }
   }
 
+  private extractPlacspTenderId(rawId: string, fallbackUrl: string, index: number): string {
+    const candidates = [rawId, fallbackUrl].filter(Boolean);
+
+    for (const value of candidates) {
+      const profileMatch = value.match(/licitacionesPerfilContratante\/(\d+)/i);
+      if (profileMatch?.[1]) return profileMatch[1];
+
+      try {
+        const parsed = new URL(value);
+        const idEvl = parsed.searchParams.get('idEvl');
+        if (idEvl) return `idEvl_${encodeURIComponent(idEvl)}`;
+
+        const pathParts = parsed.pathname.split('/').filter(Boolean);
+        const tail = pathParts[pathParts.length - 1];
+        if (tail) return tail;
+      } catch {
+        // not a URL; continue
+      }
+
+      const numericTail = value.match(/(\d{5,})$/);
+      if (numericTail?.[1]) return numericTail[1];
+    }
+
+    return `placsp-${index}`;
+  }
+
   private parseAtomFeed(xml: string): any[] {
     const $ = cheerio.load(xml, { xmlMode: true });
     const listings: any[] = [];
 
     $('entry').each((_i, entry) => {
       const $entry = $(entry);
-      const id = $entry.find('id').text().trim() || `placsp-${_i}`;
+      const idText = $entry.find('id').text().trim();
       const title = $entry.find('title').text().trim();
       const summary = $entry.find('summary').text().trim();
       const link = $entry.find('link[rel="alternate"]').attr('href') ||
         $entry.find('link').attr('href') || '';
 
       if (!title) return;
+
+      const id = this.extractPlacspTenderId(idText, link, _i);
 
       listings.push({
         id,
@@ -115,8 +143,7 @@ export class PlacspEsService extends BaseScraperService {
         ? href
         : `https://contrataciondelestado.es${href}`;
 
-      const idMatch = href.match(/idEvl=([^&]+)/) || href.match(/\/([^/?]+)\/?$/);
-      const id = idMatch ? idMatch[1] : `placsp-${_i}`;
+      const id = this.extractPlacspTenderId(href, absoluteUrl, _i);
 
       const title = $(el).text().trim();
       if (!title || title.length < 5) return;

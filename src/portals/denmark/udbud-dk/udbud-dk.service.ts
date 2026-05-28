@@ -169,10 +169,87 @@ export class UdbudDkService extends BaseScraperService {
       this.logger.warn({ error: error.message }, 'Could not acquire Cloudflare cookies for download');
     }
 
+    // Udbud detail pages are SPA shells. Real notice content is loaded from
+    // /soegning/visning/<noticeId>/<version>. Extract external tender/doc links
+    // from that payload first, then try downloading from those links.
+    const candidateLinks = await this.fetchUdbudDocumentCandidates(documentsUrl, cookies);
+    if (candidateLinks.length > 0) {
+      this.logger.info({ documentsUrl, candidateCount: candidateLinks.length }, 'Udbud.dk: trying extracted external document candidates');
+      const aggregate: DownloadResult = { downloaded: [], failed: [], skipped: [] };
+
+      for (const link of candidateLinks.slice(0, 8)) {
+        try {
+          const result = await this.downloader.discoverAndDownloadFromPage(link, destDir, {
+            timeout: 25000,
+            maxRetries: 2,
+            cookies,
+          });
+          aggregate.downloaded.push(...result.downloaded);
+          aggregate.failed.push(...result.failed);
+          aggregate.skipped.push(...result.skipped);
+        } catch (error: any) {
+          this.logger.warn({ link, error: error.message }, 'Udbud.dk: failed to process extracted candidate link');
+          aggregate.failed.push(link);
+        }
+      }
+
+      if (aggregate.downloaded.length > 0) {
+        return aggregate;
+      }
+    }
+
     return this.downloader.discoverAndDownloadFromPage(documentsUrl, destDir, {
       timeout: 20000,
       maxRetries: 2,
       cookies,
     });
+  }
+
+  private async fetchUdbudDocumentCandidates(documentsUrl: string, cookies: string): Promise<string[]> {
+    try {
+      const parsed = new URL(documentsUrl);
+      const noticeId = parsed.searchParams.get('noticeId');
+      const noticeVersion = parsed.searchParams.get('noticeVersion') || '01';
+      const noticePublicationNumber = parsed.searchParams.get('noticePublicationNumber') || '';
+      if (!noticeId) return [];
+
+      const visningUrl = `https://udbud.dk/soegning/visning/${encodeURIComponent(noticeId)}/${encodeURIComponent(noticeVersion)}${noticePublicationNumber ? `?noticePublicationNumber=${encodeURIComponent(noticePublicationNumber)}` : ''}`;
+
+      const payload = await this.httpClient.get<any>(visningUrl, {
+        timeout: 20000,
+        maxRetries: 2,
+        cookies,
+      });
+
+      const htmlDa = typeof payload?.htmlDA === 'string' ? payload.htmlDA : '';
+      const htmlEn = typeof payload?.htmlEN === 'string' ? payload.htmlEN : '';
+      const combined = `${htmlDa}\n${htmlEn}`;
+
+      const urlMatches = combined.match(/https?:\/\/[^\s"'<>]+/g) || [];
+      const cleaned = Array.from(new Set(urlMatches.map((u) => u.trim().replace(/[).,;]+$/, ''))));
+
+      return cleaned.filter((url) => {
+        const lower = url.toLowerCase();
+        // Exclude schema/docs boilerplate links and focus on likely tender/doc portals.
+        if (lower.includes('w3.org') || lower.includes('data.europa.eu') || lower.includes('kfst.dk') || lower.includes('naevneneshus.dk')) {
+          return false;
+        }
+        return (
+          lower.includes('mercell') ||
+          lower.includes('eu-supply') ||
+          lower.includes('comdia') ||
+          lower.includes('ethics') ||
+          lower.includes('ajoursystem') ||
+          lower.includes('dalux') ||
+          lower.includes('ibinder') ||
+          lower.includes('publicmaterial') ||
+          /\.pdf($|\?)/i.test(lower) ||
+          /\.zip($|\?)/i.test(lower)
+        );
+      });
+    } catch (error: any) {
+      this.logger.warn({ documentsUrl, error: error.message }, 'Udbud.dk: failed to extract visning API document candidates');
+      return [];
+    }
   }
 }

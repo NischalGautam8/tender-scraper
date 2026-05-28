@@ -165,7 +165,12 @@ export class DocumentDownloaderService {
       if (!ext) {
         const inferredExt = this.inferExtensionFromMagicBytes(destPath);
         if (inferredExt) {
-          const newDestPath = `${destPath}${inferredExt}`;
+          let newDestPath = `${destPath}${inferredExt}`;
+          let collision = 1;
+          while (fs.existsSync(newDestPath)) {
+            newDestPath = `${destPath}-${collision}${inferredExt}`;
+            collision++;
+          }
           fs.renameSync(destPath, newDestPath);
           destPath = newDestPath;
           this.logger.info({ destPath, inferredExt }, 'Inferred file extension from magic bytes');
@@ -201,6 +206,22 @@ export class DocumentDownloaderService {
           this.logger.info({ filename: doc.filename }, 'File already exists with non-zero size; skipping download (idempotency)');
           skipped.push(expectedPath);
           continue;
+        }
+
+        // If preferred filename has no extension, also treat an already-downloaded
+        // sibling with inferred extension (e.g. .pdf) as idempotent.
+        if (!path.extname(sanitizedFilename)) {
+          const sibling = fs.readdirSync(tenderOutputDir).find((name) =>
+            name.startsWith(`${sanitizedFilename}.`) || name.startsWith(`${sanitizedFilename}-`),
+          );
+          if (sibling) {
+            const siblingPath = path.join(tenderOutputDir, sibling);
+            if (fs.statSync(siblingPath).size > 0) {
+              this.logger.info({ filename: doc.filename, sibling }, 'Sibling file already exists; skipping download (idempotency)');
+              skipped.push(siblingPath);
+              continue;
+            }
+          }
         }
       }
 
@@ -876,7 +897,9 @@ export class DocumentDownloaderService {
         lowerAbsolute.includes('/portal/files/download') ||
         lowerAbsolute.includes('function=_download') ||
         lowerAbsolute.includes('/download?') ||
-        lowerAbsolute.includes('downloadtoken=');
+        lowerAbsolute.includes('downloadtoken=') ||
+        lowerAbsolute.includes('/filesystem/servlet/getdocumentbyidservlet') ||
+        lowerAbsolute.includes('documentidparam=');
 
       if (DOC_EXTENSIONS.has(ext) || looksLikeNonExtDownload) {
         seenUrls.add(absoluteUrl);
@@ -895,11 +918,27 @@ export class DocumentDownloaderService {
             linkText = undefined;
           }
         }
+        let derivedFilename: string | undefined;
+        if (lowerAbsolute.includes('/filesystem/servlet/getdocumentbyidservlet')) {
+          try {
+            const parsed = new URL(absoluteUrl);
+            const docParam = parsed.searchParams.get('DocumentIdParam') || parsed.searchParams.get('documentidparam');
+            if (docParam) {
+              const compact = docParam.replace(/[^a-zA-Z0-9]+/g, '').slice(0, 24);
+              if (compact) {
+                derivedFilename = `placsp_${compact}`;
+              }
+            }
+          } catch {
+            // ignore parse errors for derived filename
+          }
+        }
+
         documentRefs.push({
           url: absoluteUrl,
           filename: linkText && linkText.length < 200
             ? `${linkText}${ext.startsWith('.') ? '' : ext}`
-            : undefined,
+            : derivedFilename,
         });
       }
     };
@@ -1065,6 +1104,23 @@ export class DocumentDownloaderService {
       if (refs.length > 0) {
         this.logger.info({ pageUrl, count: refs.length }, 'bi-medien: found document links after opening tab');
         return this.downloadAllDocuments(refs, destDir, options);
+      }
+
+      // Fallback for bi-medien pages that expose no direct file links:
+      // store a rendered print-PDF of the tender notice page.
+      try {
+        const url = new URL(pageUrl);
+        const tenderIdMatch = url.pathname.match(/\/ausschreibungsdienste\/ausschreibungen\/([A-Z0-9-]+)/i);
+        const tenderId = tenderIdMatch?.[1] || 'unknown';
+        const outPath = path.join(destDir, `${tenderId}_notice.pdf`);
+        await page.emulateMedia({ media: 'screen' });
+        await page.pdf({ path: outPath, format: 'A4', printBackground: true });
+        if (fs.existsSync(outPath) && fs.statSync(outPath).size > 1024) {
+          this.logger.info({ pageUrl, outPath }, 'bi-medien: saved rendered notice PDF fallback');
+          return { downloaded: [outPath], failed: [], skipped: [] };
+        }
+      } catch (pdfErr: any) {
+        this.logger.debug({ pageUrl, error: pdfErr.message }, 'bi-medien notice PDF fallback failed');
       }
     } catch (error: any) {
       this.logger.warn({ pageUrl, error: error.message }, 'bi-medien documents tab flow failed; using generic fallback');

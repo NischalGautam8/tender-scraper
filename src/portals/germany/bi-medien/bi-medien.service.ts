@@ -128,6 +128,41 @@ export class BiMedienService extends BaseScraperService {
   }
 
   protected async mapToProcurement(raw: any): Promise<CreateProcurementInput> {
+    const portalUrl = raw.portalUrl;
+    let deadlineReceiptRequests = null;
+    let electronicSubmissionUrl = portalUrl;
+    let registrationRequired = false;
+
+    try {
+      const html = await this.httpClient.getText(portalUrl, { timeout: 15000, maxRetries: 2 });
+      const $ = cheerio.load(html);
+
+      const desc = $('meta[name="description"]').attr('content') || $('meta[property="og:description"]').attr('content') || '';
+      const deadlineMatch = desc.match(/Abgabefrist:\s*(\d{2})\.(\d{2})\.(\d{4})/i);
+      if (deadlineMatch) {
+        deadlineReceiptRequests = `${deadlineMatch[3]}-${deadlineMatch[2]}-${deadlineMatch[1]}T23:59:59Z`;
+      }
+
+      const teilnehmenBtn = $('a:contains("An Vergabe teilnehmen")').first();
+      if (teilnehmenBtn.length > 0) {
+        registrationRequired = true;
+        const href = teilnehmenBtn.attr('href');
+        if (href) {
+          electronicSubmissionUrl = href.startsWith('http') ? href : `https://bi-medien.de${href}`;
+        }
+      }
+
+      if (registrationRequired) {
+        this.logger.info({ tenderId: raw.id, url: portalUrl }, 'bi-medien: Registration/Login required for participation');
+        await this.outputManager.writeAlert(this.portalName, raw.id, {
+          type: 'REGISTRATION_REQUIRED',
+          message: 'Registration is required to participate in this procurement',
+        });
+      }
+    } catch (e: any) {
+      this.logger.warn({ tenderId: raw.id, url: portalUrl, error: e.message }, 'Failed to fetch bi-medien detail page for deadline/login detection');
+    }
+
     return {
       sourceArray: [
         {
@@ -159,11 +194,11 @@ export class BiMedienService extends BaseScraperService {
         awardCriteriaArray: [],
         submissionDetails: {
           deadlineReceiptTenders: null,
-          deadlineReceiptRequests: null,
+          deadlineReceiptRequests,
           deadlineClarificationRequest: null,
           allowedLanguageCodeArray: ['de'],
           electronicSubmissionRequired: true,
-          electronicSubmissionUrl: raw.portalUrl,
+          electronicSubmissionUrl,
           tenderValidityDays: null,
           openingDate: null,
           openingPlace: null,

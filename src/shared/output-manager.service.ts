@@ -17,8 +17,19 @@ export class OutputManagerService {
     return path.join(this.config.outputDir, portal);
   }
 
+  private normalizeTenderId(tenderId: string): string {
+    const raw = (tenderId || 'unknown').toString();
+    const cleaned = raw
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 180);
+
+    return cleaned || 'unknown';
+  }
+
   private getTenderDir(portal: string, tenderId: string): string {
-    return path.join(this.getPortalDir(portal), tenderId);
+    return path.join(this.getPortalDir(portal), this.normalizeTenderId(tenderId));
   }
 
   async ensureTenderDir(portal: string, tenderId: string): Promise<string> {
