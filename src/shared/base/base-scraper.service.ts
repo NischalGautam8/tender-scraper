@@ -93,6 +93,20 @@ export abstract class BaseScraperService {
   private extractOcdsDocumentRefs(tender: any): DocumentRef[] {
     const refs: DocumentRef[] = [];
 
+    const shouldSkipOcdsDocUrl = (url: string): boolean => {
+      try {
+        const host = new URL(url).hostname.toLowerCase();
+        // Guardrail: some sources embed large sets of non-procurement legal/media links
+        // (e.g. CURIA multilingual press-release PDFs) that create noisy 404 downloads.
+        if (host === 'curia.europa.eu' || host.endsWith('.curia.europa.eu')) {
+          return true;
+        }
+      } catch {
+        // ignore parse errors and let normal flow handle it
+      }
+      return false;
+    };
+
     const rawDocs = tender?.rawResponse?.tender?.documents;
     if (!Array.isArray(rawDocs)) {
       return refs;
@@ -118,6 +132,7 @@ export abstract class BaseScraperService {
     for (const doc of rawDocs) {
       const url = doc?.url;
       if (!url || typeof url !== 'string') continue;
+      if (shouldSkipOcdsDocUrl(url)) continue;
       if (seenUrls.has(url)) continue;
       seenUrls.add(url);
 

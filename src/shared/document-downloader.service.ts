@@ -291,6 +291,11 @@ export class DocumentDownloaderService {
       return this.handleBiMedienDocumentsPage(pageUrl, destDir, options);
     }
 
+    // eu-supply: documents are often behind a secondary "Documents" page and JS download actions.
+    if (host.includes('eu.eu-supply.com') || host.includes('eu-supply.com')) {
+      return this.handleEuSupplyDocumentsPage(pageUrl, destDir, options);
+    }
+
     // Custom session/redirect hopping for Cosinex/NetServer-based portals
     if (
       host.includes('dtvp.de') ||
@@ -872,6 +877,13 @@ export class DocumentDownloaderService {
 
     let documentRefs: DocumentRef[] = [];
     const seenUrls = new Set<string>();
+    const pageHost = (() => {
+      try {
+        return new URL(pageUrl).hostname.toLowerCase();
+      } catch {
+        return '';
+      }
+    })();
 
     // Helper to evaluate and add a document reference
     const addDocumentRef = (href: string, titleText?: string) => {
@@ -902,6 +914,43 @@ export class DocumentDownloaderService {
         lowerAbsolute.includes('documentidparam=');
 
       if (DOC_EXTENSIONS.has(ext) || looksLikeNonExtDownload) {
+        const absoluteHost = (() => {
+          try {
+            return new URL(absoluteUrl).hostname.toLowerCase();
+          } catch {
+            return '';
+          }
+        })();
+
+        const isExternalHost =
+          !!absoluteHost &&
+          !!pageHost &&
+          absoluteHost !== pageHost &&
+          !absoluteHost.endsWith(`.${pageHost}`) &&
+          !pageHost.endsWith(`.${absoluteHost}`);
+
+        const normalizedTitle = (titleText || '').trim();
+        const lowerTitle = normalizedTitle.toLowerCase();
+        const isVeryShortLangLikeLabel = /^[A-Z]{2,4}$/.test(normalizedTitle);
+        const hasProcurementCue =
+          /(tender|udbud|procurement|rfq|offer|bid|anbud|publicmaterial|download|document|attachment|bilag|underlag|spec|cftuuid|ctm|mercell|comdia|dalux|ethics|eu-supply|rib-software|c-web)/i.test(lowerAbsolute) ||
+          /(tender|udbud|procurement|rfq|offer|bid|anbud|download|document|attachment|bilag|underlag|spec)/i.test(lowerTitle);
+
+        const isKnownNoisyHost =
+          absoluteHost === 'curia.europa.eu' || absoluteHost.endsWith('.curia.europa.eu');
+
+        // Guardrail: avoid obvious noise links (e.g. CURIA language PDFs)
+        // that frequently appear on EU pages but are not tender documents.
+        if (isKnownNoisyHost) {
+          return;
+        }
+
+        // For direct-file links on external hosts, require stronger procurement cues.
+        if (isExternalHost && DOC_EXTENSIONS.has(ext) && !looksLikeNonExtDownload) {
+          if (!hasProcurementCue && (!normalizedTitle || isVeryShortLangLikeLabel)) {
+            return;
+          }
+        }
         seenUrls.add(absoluteUrl);
         let linkText = titleText?.trim();
         // Ignore generic download buttons or text that don't represent actual file names
@@ -981,6 +1030,215 @@ export class DocumentDownloaderService {
     );
 
     return this.downloadAllDocuments(documentRefs, destDir, options);
+  }
+
+  /**
+   * eu-supply specific handling.
+   * Flow: public tender page -> Documents link -> JS-triggered file downloads.
+   */
+  private async handleEuSupplyDocumentsPage(
+    pageUrl: string,
+    destDir: string,
+    options: RequestOptions = {},
+  ): Promise<DownloadResult> {
+    this.logger.info({ pageUrl }, 'Handling eu-supply portal via Playwright (documents flow)');
+
+    let context: any;
+    try {
+      const result = await this.browserPool.acquirePage(pageUrl);
+      context = result.context;
+      const page = result.page;
+
+      await page.waitForTimeout(3000);
+      await this.dismissKnownCookieOverlays(page);
+
+      const aggregate: DownloadResult = { downloaded: [], failed: [], skipped: [] };
+      const docsPageUrls: string[] = [];
+      const seenDocPages = new Set<string>();
+
+      const pushDocPage = (rawUrl: string) => {
+        try {
+          const absolute = new URL(rawUrl, page.url()).toString();
+          if (seenDocPages.has(absolute)) return;
+          seenDocPages.add(absolute);
+          docsPageUrls.push(absolute);
+        } catch {
+          // ignore invalid URLs
+        }
+      };
+
+      // If already on a docs page, include it.
+      if (page.url().toLowerCase().includes('/publicpurchase_docs.asp')) {
+        pushDocPage(page.url());
+      }
+
+      // Discover docs-page links from current page.
+      const entryLinks = await page.$$eval('a[href]', (anchors) =>
+        anchors
+          .map((a) => ({ href: a.getAttribute('href') || '', text: (a.textContent || '').trim().toLowerCase() }))
+          .filter((x) => x.href && (x.href.toLowerCase().includes('/publicpurchase_docs.asp') || x.text === 'documents' || x.text.includes('documents')))
+          .map((x) => x.href),
+      );
+      for (const href of entryLinks) {
+        pushDocPage(href);
+      }
+
+      // Some pages require opening package/additional information first; try common toggles.
+      const sectionSelectors = [
+        'a:has-text("Additional information")',
+        'a:has-text("Yderligere oplysninger")',
+        'a:has-text("Packages")',
+      ];
+      for (const selector of sectionSelectors) {
+        try {
+          if (await page.locator(selector).count() > 0) {
+            await page.locator(selector).first().click({ timeout: 3000 });
+            await page.waitForTimeout(800);
+          }
+        } catch {
+          // continue
+        }
+      }
+
+      const linksAfterClick = await page.$$eval('a[href]', (anchors) =>
+        anchors
+          .map((a) => a.getAttribute('href') || '')
+          .filter((href) => href.toLowerCase().includes('/publicpurchase_docs.asp')),
+      );
+      for (const href of linksAfterClick) {
+        pushDocPage(href);
+      }
+
+      // Fallback: infer docs endpoint from PID in rwlentrance/publicpurchase URL.
+      if (docsPageUrls.length === 0) {
+        try {
+          const parsed = new URL(page.url());
+          const pid = parsed.searchParams.get('PID') || parsed.searchParams.get('pid');
+          if (pid) {
+            pushDocPage(`https://eu.eu-supply.com/app/rfq/publicpurchase_docs.asp?PID=${encodeURIComponent(pid)}&AllowPrint=1`);
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      for (const docPageUrl of docsPageUrls.slice(0, 6)) {
+        try {
+          if (page.url() !== docPageUrl) {
+            await page.goto(docPageUrl, { waitUntil: 'networkidle', timeout: 30000 });
+            await page.waitForTimeout(1500);
+          }
+
+          // Strategy A: click controls that trigger browser download events.
+          const clickSelectors = [
+            'a[href*="/app/docmgmt/download"]',
+            'a[href^="javascript:Download"]',
+            '[onclick*="DownloadPublicDocument"]',
+            '[onclick*="DownloadByPurchaseId"]',
+            '[onclick*="Download("]',
+            'a[title*="download" i]',
+          ];
+
+          for (const selector of clickSelectors) {
+            let count = 0;
+            try {
+              count = await page.locator(selector).count();
+            } catch {
+              count = 0;
+            }
+
+            for (let i = 0; i < Math.min(count, 60); i++) {
+              try {
+                const locator = page.locator(selector).nth(i);
+                const [downloadEvent] = await Promise.all([
+                  page.waitForEvent('download', { timeout: 4000 }),
+                  locator.click({ timeout: 2500 }),
+                ]);
+                const savePath = path.join(destDir, downloadEvent.suggestedFilename());
+                await downloadEvent.saveAs(savePath);
+                if (fs.existsSync(savePath) && fs.statSync(savePath).size > 0) {
+                  aggregate.downloaded.push(savePath);
+                }
+              } catch {
+                // not every click yields a download event
+              }
+            }
+          }
+
+          if (aggregate.downloaded.length > 0) {
+            return aggregate;
+          }
+
+          // Strategy B: discover direct docmgmt links from rendered DOM.
+          const domRefs: DocumentRef[] = [];
+          const seenLinks = new Set<string>();
+          const refs = await page.$$eval('a[href]', (anchors) => anchors.map((a) => ({
+            href: a.getAttribute('href') || '',
+            text: (a.textContent || '').trim(),
+          })));
+
+          for (const item of refs) {
+            const hrefLower = item.href.toLowerCase();
+            if (!hrefLower.includes('/app/docmgmt/download')) continue;
+            try {
+              const absolute = new URL(item.href, page.url()).toString();
+              if (seenLinks.has(absolute)) continue;
+              seenLinks.add(absolute);
+              domRefs.push({ url: absolute, filename: item.text || undefined });
+            } catch {
+              // ignore invalid
+            }
+          }
+
+          if (domRefs.length > 0) {
+            const docResult = await this.downloadAllDocuments(domRefs, destDir, options);
+            aggregate.downloaded.push(...docResult.downloaded);
+            aggregate.failed.push(...docResult.failed);
+            aggregate.skipped.push(...docResult.skipped);
+            if (aggregate.downloaded.length > 0) {
+              return aggregate;
+            }
+          }
+
+          // Strategy C: save docs page HTML as fallback evidence when direct files are blocked.
+          const html = await page.content();
+          const snapshotPath = path.join(destDir, 'eu_supply_documents_page.html');
+          if (!fs.existsSync(snapshotPath) || fs.statSync(snapshotPath).size === 0) {
+            fs.writeFileSync(snapshotPath, html, 'utf8');
+            aggregate.downloaded.push(snapshotPath);
+            return aggregate;
+          }
+        } catch (error: any) {
+          this.logger.warn({ docPageUrl, error: error.message }, 'eu-supply: failed processing docs page URL');
+          aggregate.failed.push(docPageUrl);
+        }
+      }
+
+      // Last resort: store current rendered page for traceability.
+      try {
+        const outPath = path.join(destDir, 'eu_supply_page.html');
+        const html = await page.content();
+        if (!fs.existsSync(outPath) || fs.statSync(outPath).size === 0) {
+          fs.writeFileSync(outPath, html, 'utf8');
+          aggregate.downloaded.push(outPath);
+          return aggregate;
+        }
+      } catch {
+        // ignore fallback write errors
+      }
+
+      return aggregate.downloaded.length > 0
+        ? aggregate
+        : { downloaded: [], failed: [pageUrl], skipped: [] };
+    } catch (error: any) {
+      this.logger.warn({ pageUrl, error: error.message }, 'eu-supply flow failed; using generic fallback');
+    } finally {
+      if (context) {
+        await this.browserPool.cleanupContext(context);
+      }
+    }
+
+    return this.playwrightDownloadFallback(pageUrl, destDir);
   }
 
   /**
@@ -1241,6 +1499,13 @@ export class DocumentDownloaderService {
       const $dynamic = cheerio.load(dynamicHtml);
       const refs: DocumentRef[] = [];
       const seen = new Set<string>();
+      const pageHost = (() => {
+        try {
+          return new URL(page.url()).hostname.toLowerCase();
+        } catch {
+          return '';
+        }
+      })();
 
       $dynamic('a[href]').each((_i, el) => {
         const href = $dynamic(el).attr('href');
@@ -1259,9 +1524,44 @@ export class DocumentDownloaderService {
         if (DOC_EXTENSIONS.has(ext) || looksLikeNonExtDownload) {
           try {
             const absoluteUrl = new URL(href, page.url()).toString();
+            const absoluteHost = (() => {
+              try {
+                return new URL(absoluteUrl).hostname.toLowerCase();
+              } catch {
+                return '';
+              }
+            })();
+
+            const isExternalHost =
+              !!absoluteHost &&
+              !!pageHost &&
+              absoluteHost !== pageHost &&
+              !absoluteHost.endsWith(`.${pageHost}`) &&
+              !pageHost.endsWith(`.${absoluteHost}`);
+
+            const linkText = $dynamic(el).text().trim();
+            const lowerLinkText = linkText.toLowerCase();
+            const isVeryShortLangLikeLabel = /^[A-Z]{2,4}$/.test(linkText);
+            const hasProcurementCue =
+              /(tender|udbud|procurement|rfq|offer|bid|anbud|publicmaterial|download|document|attachment|bilag|underlag|spec|cftuuid|ctm|mercell|comdia|dalux|ethics|eu-supply|rib-software|c-web)/i.test(absoluteUrl.toLowerCase()) ||
+              /(tender|udbud|procurement|rfq|offer|bid|anbud|download|document|attachment|bilag|underlag|spec)/i.test(lowerLinkText);
+
+            const isKnownNoisyHost =
+              absoluteHost === 'curia.europa.eu' || absoluteHost.endsWith('.curia.europa.eu');
+
+            if (isKnownNoisyHost) {
+              return;
+            }
+
+            if (isExternalHost && DOC_EXTENSIONS.has(ext) && !looksLikeNonExtDownload) {
+              if (!hasProcurementCue && (!linkText || isVeryShortLangLikeLabel)) {
+                return;
+              }
+            }
+
             if (!seen.has(absoluteUrl)) {
               seen.add(absoluteUrl);
-              refs.push({ url: absoluteUrl, filename: $dynamic(el).text().trim() || undefined });
+              refs.push({ url: absoluteUrl, filename: linkText || undefined });
             }
           } catch { /* skip */ }
         }
