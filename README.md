@@ -1,6 +1,13 @@
 # 🏗️ EU Tender Portal Scraper (BOND Assessment)
 
-A NestJS-based enterprise-grade EU procurement tender scraper and document downloader designed to bypass anti-bot WAFs (Cloudflare & WebSphere) across 11 portals (9 German portals, 1 Danish portal, and 1 Spanish portal).
+A NestJS-based enterprise-grade EU procurement tender scraper and document downloader designed to bypass anti-bot WAFs (Cloudflare & WebSphere) across 12 portals (9 German portals, 2 Tier A foreign portals [Udbud.dk 🇩🇰, TenderNed 🇳🇱] and 1 Tier C foreign portal [PLACSP 🇪🇸]).
+
+### 🌍 Foreign Portals & Difficulty Tiers
+- **Tier A (WAF / Cloudflare & Bot Protection Stealth)**:
+  - **Udbud.dk 🇩🇰** (Denmark): Bypasses aggressive Cloudflare protection using simulated browser profiles and session cookies.
+  - **TenderNed 🇳🇱** (Netherlands): Resolves high-volume bot protection and reCAPTCHA by using direct REST API mapping for listings and documents.
+- **Tier C (eIDAS/SPID Identity-wall and Advanced WebSphere Session Management)**:
+  - **PLACSP 🇪🇸** (Spain): Direct document and pliegos downloading, bypassing strict WebSphere cookie-ordering and rate-limiting rules.
 
 ---
 
@@ -24,7 +31,7 @@ The application can run in three execution modes:
 ### 4. Output Directories & Strict Schema Compliance
 All output data is saved under `output/<portal-name>/<tender-id>/`:
 * `procurement.json`: Adheres to the strict BOND data schema, ensuring:
-  * Only original-language strings are written inside the `LocaleObject` fields (`de` for German, `da` for Danish, `es` for Spanish).
+  * Only original-language strings are written inside the `LocaleObject` fields (`de` for German, `da` for Danish, `es` for Spanish, `nl` for Dutch).
   * No pipeline-owned fields (e.g. `deliverableArray`, `requirementArray`, `winningCompanyIdArray`, `point`, `area`, `uberH3`) are populated.
 * `documents/`: Contains all attachments and tender files downloaded from the source portal, preserving original filenames.
 
@@ -111,9 +118,16 @@ $ npm run scrape
 This will:
 1. Boot the NestJS container in Standalone Context Mode.
 2. Trigger the discovery phase.
-3. Dispatch notices to all 11 sub-portal services.
+3. Dispatch notices to all active sub-portal services.
 4. Download attachments and output `procurement.json` schema files under the `output/` directory.
 5. Exit cleanly with code `0`.
+
+### Step 4b: Run a Focused Scraper Execution (TenderNed only)
+To execute scraping focusing only on the newly added TenderNed portal (skipping all other portals):
+```bash
+$ npm run scrape:focused
+```
+This runs the scrape cycle while skipping all other 11 portals, which makes it ideal for testing or focused execution.
 
 ### Step 5: Start the HTTP Server and trigger via HTTP
 Start the NestJS application in server mode:
@@ -149,3 +163,4 @@ Crons are automatically registered and executed when running in Server Mode:
 | **Charité Berlin** | `charite-berlin` | `0 4 * * *` (04:00) | `0 6 * * *` (06:00) | German (`de`) |
 | **Udbud.dk** | `udbud-dk` | `0 3 * * *` (03:00) | `0 5 * * *` (05:00) | Danish (`da`) |
 | **PLACSP** | `placsp-es` | `30 3 * * *` (03:30) | `30 5 * * *` (05:30) | Spanish (`es`) |
+| **TenderNed** | `tenderned-nl` | `0 5 * * *` (05:00) | `0 7 * * *` (07:00) | Dutch (`nl`) |

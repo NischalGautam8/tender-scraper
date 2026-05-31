@@ -14,6 +14,7 @@ dist/
 
 # Scraper data outputs
 output/
+browser_data/
 
 # Debug and log files
 npm-debug.log*

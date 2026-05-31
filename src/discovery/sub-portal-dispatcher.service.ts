@@ -56,6 +56,7 @@ export class SubPortalDispatcherService {
       'sachsen-evergabe': 'SachsenEvergabeService',
       'udbud-dk': 'UdbudDkService',
       'placsp-es': 'PlacspEsService',
+      'tenderned-nl': 'TendernedNlService',
     };
     
     return registry[moduleName] ?? null;

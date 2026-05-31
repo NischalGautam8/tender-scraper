@@ -296,6 +296,11 @@ export class DocumentDownloaderService {
       return this.handleEuSupplyDocumentsPage(pageUrl, destDir, options);
     }
 
+    // Netherlands TenderNed: public documents API + individual doc links
+    if (host.includes('tenderned.nl')) {
+      return this.handleTendernedNlDocumentsPage(pageUrl, destDir, options);
+    }
+
     // Custom session/redirect hopping for Cosinex/NetServer-based portals
     if (
       host.includes('dtvp.de') ||
@@ -606,10 +611,11 @@ export class DocumentDownloaderService {
       // Last resort: Playwright — click the info icon, wait for modal, extract document links
       this.logger.info({ pageUrl }, 'Cosinex: trying Playwright to click info icon and extract docs from modal');
       let context: any;
+    let page: any;
       try {
         const result = await this.browserPool.acquirePage(pageUrl);
         context = result.context;
-        const page = result.page;
+        page = result.page;
 
         // Wait for the DevExtreme grid to render
         await page.waitForTimeout(6000);
@@ -672,7 +678,7 @@ export class DocumentDownloaderService {
       } catch (pwErr: any) {
         this.logger.warn({ error: pwErr.message }, 'Playwright Cosinex modal approach failed');
       } finally {
-        if (context) await this.browserPool.cleanupContext(context);
+        if (page) await this.browserPool.cleanupPage(page);
       }
 
       this.logger.warn({ pageUrl }, 'All Cosinex download strategies exhausted');
@@ -726,10 +732,11 @@ export class DocumentDownloaderService {
 
       this.logger.info({ pageUrl }, 'Handling evergabe.de portal via Playwright');
       let context: any;
+    let page: any;
       try {
         const result = await this.browserPool.acquirePage(pageUrl);
         context = result.context;
-        const page = result.page;
+        page = result.page;
 
         this.logger.info('Handling evergabe.de access/download flow');
         // Wait for page to fully render
@@ -845,7 +852,7 @@ export class DocumentDownloaderService {
         this.logger.warn({ error: err.message }, 'Failed during evergabe.de Playwright handling');
       } finally {
         if (context) {
-          await this.browserPool.cleanupContext(context);
+          await this.browserPool.cleanupPage(page);
         }
       }
       this.logger.warn({ pageUrl }, 'evergabe.de download failed. Returning failure.');
@@ -1044,10 +1051,11 @@ export class DocumentDownloaderService {
     this.logger.info({ pageUrl }, 'Handling eu-supply portal via Playwright (documents flow)');
 
     let context: any;
+    let page: any;
     try {
       const result = await this.browserPool.acquirePage(pageUrl);
       context = result.context;
-      const page = result.page;
+      page = result.page;
 
       await page.waitForTimeout(3000);
       await this.dismissKnownCookieOverlays(page);
@@ -1073,11 +1081,11 @@ export class DocumentDownloaderService {
       }
 
       // Discover docs-page links from current page.
-      const entryLinks = await page.$$eval('a[href]', (anchors) =>
+      const entryLinks = await page.$$eval('a[href]', (anchors: any[]) =>
         anchors
-          .map((a) => ({ href: a.getAttribute('href') || '', text: (a.textContent || '').trim().toLowerCase() }))
-          .filter((x) => x.href && (x.href.toLowerCase().includes('/publicpurchase_docs.asp') || x.text === 'documents' || x.text.includes('documents')))
-          .map((x) => x.href),
+          .map((a: any) => ({ href: a.getAttribute('href') || '', text: (a.textContent || '').trim().toLowerCase() }))
+          .filter((x: any) => x.href && (x.href.toLowerCase().includes('/publicpurchase_docs.asp') || x.text === 'documents' || x.text.includes('documents')))
+          .map((x: any) => x.href),
       );
       for (const href of entryLinks) {
         pushDocPage(href);
@@ -1100,10 +1108,10 @@ export class DocumentDownloaderService {
         }
       }
 
-      const linksAfterClick = await page.$$eval('a[href]', (anchors) =>
+      const linksAfterClick = await page.$$eval('a[href]', (anchors: any[]) =>
         anchors
-          .map((a) => a.getAttribute('href') || '')
-          .filter((href) => href.toLowerCase().includes('/publicpurchase_docs.asp')),
+          .map((a: any) => a.getAttribute('href') || '')
+          .filter((href: any) => href.toLowerCase().includes('/publicpurchase_docs.asp')),
       );
       for (const href of linksAfterClick) {
         pushDocPage(href);
@@ -1172,7 +1180,7 @@ export class DocumentDownloaderService {
           // Strategy B: discover direct docmgmt links from rendered DOM.
           const domRefs: DocumentRef[] = [];
           const seenLinks = new Set<string>();
-          const refs = await page.$$eval('a[href]', (anchors) => anchors.map((a) => ({
+          const refs = await page.$$eval('a[href]', (anchors: any[]) => anchors.map((a: any) => ({
             href: a.getAttribute('href') || '',
             text: (a.textContent || '').trim(),
           })));
@@ -1234,7 +1242,7 @@ export class DocumentDownloaderService {
       this.logger.warn({ pageUrl, error: error.message }, 'eu-supply flow failed; using generic fallback');
     } finally {
       if (context) {
-        await this.browserPool.cleanupContext(context);
+        await this.browserPool.cleanupPage(page);
       }
     }
 
@@ -1253,10 +1261,11 @@ export class DocumentDownloaderService {
     this.logger.info({ pageUrl }, 'Handling bi-medien portal via Playwright (documents tab flow)');
 
     let context: any;
+    let page: any;
     try {
       const result = await this.browserPool.acquirePage(pageUrl);
       context = result.context;
-      const page = result.page;
+      page = result.page;
 
       await page.waitForTimeout(3500);
       await this.dismissKnownCookieOverlays(page);
@@ -1384,7 +1393,7 @@ export class DocumentDownloaderService {
       this.logger.warn({ pageUrl, error: error.message }, 'bi-medien documents tab flow failed; using generic fallback');
     } finally {
       if (context) {
-        await this.browserPool.cleanupContext(context);
+        await this.browserPool.cleanupPage(page);
       }
     }
 
@@ -1448,10 +1457,11 @@ export class DocumentDownloaderService {
     destDir: string,
   ): Promise<DownloadResult> {
     let context: any;
+    let page: any;
     try {
       const result = await this.browserPool.acquirePage(pageUrl);
       context = result.context;
-      const page = result.page;
+      page = result.page;
 
       // Let dynamic content load
       await page.waitForTimeout(5000);
@@ -1575,11 +1585,119 @@ export class DocumentDownloaderService {
       this.logger.error({ pageUrl, error: err.message }, 'Playwright fallback encountered error');
     } finally {
       if (context) {
-        await this.browserPool.cleanupContext(context);
+        await this.browserPool.cleanupPage(page);
       }
     }
 
     this.logger.warn({ pageUrl }, 'No downloadable document links found on page (static or dynamic)');
+    return { downloaded: [], failed: [pageUrl], skipped: [] };
+  }
+
+  private async handleTendernedNlDocumentsPage(
+    pageUrl: string,
+    destDir: string,
+    options: RequestOptions = {},
+  ): Promise<DownloadResult> {
+    this.logger.info({ pageUrl }, 'Handling TenderNed (NL) documents');
+
+    const publicatieIdMatch = pageUrl.match(/\/([0-9]+)(?:\/|$|\?)/);
+    if (!publicatieIdMatch) {
+      this.logger.warn({ pageUrl }, 'No publicatieId found in TenderNed URL');
+      return { downloaded: [], failed: [pageUrl], skipped: [] };
+    }
+    const publicatieId = publicatieIdMatch[1];
+
+    const docsApiUrl = `https://www.tenderned.nl/papi/tenderned-rs-tns/v2/publicaties/${publicatieId}/documenten`;
+    this.logger.info({ docsApiUrl }, 'Fetching documents list from TenderNed API');
+
+    try {
+      const responseText = await this.httpClient.getText(docsApiUrl, {
+        ...options,
+        timeout: 15000,
+      });
+      const data = JSON.parse(responseText);
+
+      if (data && Array.isArray(data.documenten)) {
+        const refs: DocumentRef[] = [];
+        for (const doc of data.documenten) {
+          const downloadPath = doc.links?.download?.href;
+          if (!downloadPath) continue;
+
+          const downloadUrl = `https://www.tenderned.nl${downloadPath}`;
+          let filename = doc.documentNaam || `document_${doc.documentId}`;
+
+          const extCode = (doc.typeDocument?.code || '').toLowerCase();
+          if (extCode) {
+            const currentExt = path.extname(filename).toLowerCase();
+            const targetExt = `.${extCode}`;
+            if (currentExt !== targetExt) {
+              filename = `${filename}${targetExt}`;
+            }
+          }
+
+          refs.push({
+            url: downloadUrl,
+            filename,
+          });
+        }
+
+        if (refs.length > 0) {
+          this.logger.info({ count: refs.length, publicatieId }, 'Found documents in TenderNed API; downloading');
+          return this.downloadAllDocuments(refs, destDir, options);
+        }
+      }
+    } catch (err: any) {
+      this.logger.warn({ publicatieId, error: err.message }, 'Failed to fetch documents from TenderNed API; falling back to Playwright');
+    }
+
+    this.logger.info({ pageUrl }, 'Falling back to Playwright for TenderNed documents');
+    let context: any;
+    let page: any;
+    try {
+      const result = await this.browserPool.acquirePage(pageUrl);
+      context = result.context;
+      page = result.page;
+
+      await page.waitForTimeout(5000);
+
+      const html = await page.content();
+      const $ = cheerio.load(html);
+      const refs: DocumentRef[] = [];
+      const seen = new Set<string>();
+
+      $('a[href]').each((_i, el) => {
+        const href = $(el).attr('href');
+        if (!href) return;
+
+        let cleanHref = href;
+        const semiIdx = cleanHref.indexOf(';');
+        if (semiIdx !== -1) cleanHref = cleanHref.substring(0, semiIdx);
+        const ext = path.extname(cleanHref).toLowerCase();
+
+        if (DOC_EXTENSIONS.has(ext) || href.includes('/documenten/') || href.includes('download')) {
+          try {
+            const absoluteUrl = new URL(href, pageUrl).toString();
+            if (!seen.has(absoluteUrl)) {
+              seen.add(absoluteUrl);
+              refs.push({ url: absoluteUrl, filename: $(el).text().trim() || undefined });
+            }
+          } catch { /* skip */ }
+        }
+      });
+
+      if (refs.length > 0) {
+        this.logger.info({ count: refs.length }, 'Found document links in Playwright-rendered page for TenderNed');
+        return this.downloadAllDocuments(refs, destDir, options);
+      }
+    } catch (err: any) {
+      this.logger.error({ pageUrl, error: err.message }, 'Playwright fallback failed for TenderNed');
+    } finally {
+      if (context) {
+        await this.browserPool.cleanupPage(page);
+      }
+    }
+
+    this.logger.warn({ pageUrl }, 'No downloadable document links found on TenderNed page');
     return { downloaded: [], failed: [pageUrl], skipped: [] };
   }
 }

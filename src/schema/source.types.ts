@@ -9,7 +9,15 @@ export type PortalSource =
   | VergabekooperationBerlinSource
   | SachsenEvergabeSource
   | UdbudDkSource
-  | PlacspSource;
+  | PlacspSource
+  | TendernedNlSource;
+
+export interface TendernedNlSource {
+  __type: 'TendernedNlSource';
+  publicatieId: string;
+  kenmerk: string | null;
+  portalUrl: string;
+}
 
 export interface DtvpSource {
   __type: 'DtvpSource';

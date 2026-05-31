@@ -1,11 +1,13 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
-import { chromium, Browser, BrowserContext, Page } from 'playwright';
+import { chromium, BrowserContext, Page } from 'playwright';
 import { TypedConfigService } from '../../config/typed-config.service';
+import * as path from 'path';
+import * as fs from 'fs';
 
 @Injectable()
 export class BrowserPoolService implements OnModuleDestroy {
-  private browser: Browser | null = null;
+  private persistentContext: BrowserContext | null = null;
 
   constructor(
     private readonly config: TypedConfigService,
@@ -14,58 +16,82 @@ export class BrowserPoolService implements OnModuleDestroy {
   ) {}
 
   /**
-   * Acquire a clean browser page, initializing the browser if needed.
+   * Acquire a clean browser page, initializing the persistent context if needed.
+   * Uses persistent context to support browser extensions like NopeCHA.
    */
   async acquirePage(url?: string): Promise<{ context: BrowserContext; page: Page }> {
-    if (!this.browser) {
-      this.logger.info('Launching Chromium browser instance');
-      this.browser = await chromium.launch({
-        headless: this.config.isPlaywrightHeadless,
-        args: [
-          '--disable-blink-features=AutomationControlled',
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-        ],
+    if (!this.persistentContext) {
+      const extensionPath = path.join(process.cwd(), 'nopecha_extension');
+      const hasExtension = fs.existsSync(extensionPath);
+      
+      if (hasExtension) {
+        this.logger.info('Launching persistent Chromium context with NopeCHA extension');
+      } else {
+        this.logger.info('Launching persistent Chromium context (NopeCHA extension not found)');
+      }
+      
+      const userDataDir = path.join(process.cwd(), 'browser_data');
+
+      const isHeadless = this.config.isPlaywrightHeadless;
+      const args = [
+        '--disable-blink-features=AutomationControlled',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+      ];
+
+      if (hasExtension) {
+        args.push(
+          `--disable-extensions-except=${extensionPath}`,
+          `--load-extension=${extensionPath}`,
+        );
+      }
+
+      if (isHeadless) {
+        args.push('--headless=new');
+      }
+
+      this.persistentContext = await chromium.launchPersistentContext(userDataDir, {
+        headless: false, // Must be false to allow extensions. If headless is needed, --headless=new in args achieves it.
+        args,
+        userAgent:
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        locale: 'de-DE,de;q=0.9',
+        viewport: { width: 1280, height: 800 },
+        deviceScaleFactor: 1,
+      });
+
+      // Humanize page execution context by mocking navigator.webdriver to undefined
+      await this.persistentContext.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', {
+          get: () => undefined,
+        });
       });
     }
 
-    const context = await this.browser.newContext({
-      userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      locale: 'de-DE,de;q=0.9',
-      viewport: { width: 1280, height: 800 },
-      deviceScaleFactor: 1,
-    });
-
-    // Humanize page execution context by mocking navigator.webdriver to undefined
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', {
-        get: () => undefined,
-      });
-    });
-
-    const page = await context.newPage();
+    const page = await this.persistentContext.newPage();
     if (url) {
       this.logger.info({ url }, 'Navigating browser to page');
       await page.goto(url, { waitUntil: 'domcontentloaded' });
     }
 
-    return { context, page };
+    return { context: this.persistentContext, page };
   }
 
-  async cleanupContext(context: BrowserContext): Promise<void> {
+  async cleanupPage(page: Page): Promise<void> {
     try {
-      await context.close();
+      if (page && !page.isClosed()) {
+        await page.close();
+      }
     } catch (error: any) {
-      this.logger.error({ error: error.message }, 'Failed to close browser context');
+      this.logger.error({ error: error.message }, 'Failed to close browser page');
     }
   }
 
   async onModuleDestroy() {
-    if (this.browser) {
-      this.logger.info('Closing Chromium browser pool');
-      await this.browser.close();
-      this.browser = null;
+    if (this.persistentContext) {
+      this.logger.info('Closing persistent Chromium context pool');
+      await this.persistentContext.close();
+      this.persistentContext = null;
     }
   }
 }

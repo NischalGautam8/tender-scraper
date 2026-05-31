@@ -24,6 +24,8 @@ import { UdbudDkModule } from './portals/denmark/udbud-dk/udbud-dk.module';
 import { PlacspEsModule } from './portals/spain/placsp-es/placsp-es.module';
 import { UdbudDkCron } from './portals/denmark/udbud-dk/udbud-dk.cron';
 import { PlacspEsCron } from './portals/spain/placsp-es/placsp-es.cron';
+import { TendernedNlModule } from './portals/netherlands/tenderned-nl/tenderned-nl.module';
+import { TendernedNlCron } from './portals/netherlands/tenderned-nl/tenderned-nl.cron';
 
 @Module({
   imports: [
@@ -64,6 +66,7 @@ import { PlacspEsCron } from './portals/spain/placsp-es/placsp-es.cron';
     DeutscheEvergabeModule,
     UdbudDkModule,
     PlacspEsModule,
+    TendernedNlModule,
   ],
   controllers: [AppController],
   providers: [
@@ -73,6 +76,7 @@ import { PlacspEsCron } from './portals/spain/placsp-es/placsp-es.cron';
     DeutscheEvergabeCron,
     UdbudDkCron,
     PlacspEsCron,
+    TendernedNlCron,
   ],
 })
 export class AppModule {}

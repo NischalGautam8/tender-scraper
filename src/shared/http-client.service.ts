@@ -187,6 +187,11 @@ export class HttpClientService {
     return response.data;
   }
 
+  async postText(url: string, body: unknown, options: RequestOptions = {}): Promise<string> {
+    const response = await this.executeRequest<string>('POST', url, body, options, 'text');
+    return response.data;
+  }
+
   /**
    * Streams a file download directly to a filesystem path.
    * Implements stall detection and overall timeout to prevent hanging.

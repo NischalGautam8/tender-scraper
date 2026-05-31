@@ -45,7 +45,7 @@ export class CloudflareBypassService {
       this.cookieExpiry = now + 5 * 60 * 1000;
       return this.cookiesStr;
     } finally {
-      await this.browserPool.cleanupContext(context);
+      await this.browserPool.cleanupPage(page);
     }
   }
 }

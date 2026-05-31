@@ -36,6 +36,7 @@ export class AppService {
     'ChariteBerlinService',
     'UdbudDkService',
     'PlacspEsService',
+    'TendernedNlService',
   ] as const;
 
   constructor(
