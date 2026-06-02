@@ -6,6 +6,8 @@ import { DocumentDownloaderService, DownloadResult } from '../../../shared/docum
 import { OutputManagerService } from '../../../shared/output-manager.service';
 import { CreateProcurementInput } from '../../../schema/procurement.types';
 import * as cheerio from 'cheerio';
+import * as fs from 'fs';
+import * as path from 'path';
 
 @Injectable()
 export class EvergabeDeService extends BaseScraperService {
@@ -73,6 +75,24 @@ export class EvergabeDeService extends BaseScraperService {
     }
   }
 
+  private normalizeEvergabeUrl(url: string): string {
+    if (!url || !url.includes('evergabe.de')) return url;
+
+    // Some OCDS exports contain doubly-encoded URL segments (%2520 => %20).
+    // Decode conservatively (max 2 rounds) so we keep valid URLs but avoid over-decoding.
+    let normalized = url.trim();
+    for (let i = 0; i < 2; i++) {
+      try {
+        const decoded = decodeURI(normalized);
+        if (decoded === normalized) break;
+        normalized = decoded;
+      } catch {
+        break;
+      }
+    }
+    return normalized;
+  }
+
   /**
    * Resolve the best documents URL for an evergabe.de tender.
    *
@@ -82,11 +102,12 @@ export class EvergabeDeService extends BaseScraperService {
    * to find the correct /unterlagen/ URL:
    *
    * 1. Scan OCDS rawResponse.tender.documents[] for /unterlagen/ URLs
-   * 2. Extract /unterlagen/ URLs from the tender description text
-   * 3. Fall back to the original URL
+   * 2. Scan serialized raw response for escaped /unterlagen/ URLs
+   * 3. Extract /unterlagen/ URLs from the tender description text
+   * 4. Fall back to the original URL (normalized)
    */
   private resolveDocumentsUrl(raw: any): string {
-    const originalUrl: string = raw.documentsUrl || raw.portalUrl || '';
+    const originalUrl: string = this.normalizeEvergabeUrl(raw.documentsUrl || raw.portalUrl || '');
 
     // If the URL already points to /unterlagen/, it's fine
     if (originalUrl.includes('/unterlagen/')) {
@@ -99,29 +120,48 @@ export class EvergabeDeService extends BaseScraperService {
       for (const doc of rawDocs) {
         const url = doc?.url;
         if (typeof url === 'string' && url.includes('evergabe.de') && url.includes('/unterlagen/')) {
+          const resolvedUrl = this.normalizeEvergabeUrl(url);
           this.logger.info(
-            { originalUrl, resolvedUrl: url },
+            { originalUrl, resolvedUrl },
             'Resolved /unterlagen/ URL from OCDS documents array',
           );
-          return url;
+          return resolvedUrl;
         }
       }
     }
 
-    // Strategy 2: Extract /unterlagen/ URLs from description text
+    // Strategy 2: Scan serialized raw response for escaped/embedded /unterlagen/ links
+    try {
+      const serialized = JSON.stringify(raw.rawResponse ?? {});
+      const unescaped = serialized.replace(/\\\//g, '/').replace(/\\u0026/gi, '&');
+      const embeddedMatch = unescaped.match(/https?:\/\/(?:www\.)?evergabe\.de\/unterlagen\/[^\s"'<>)]+/i);
+      if (embeddedMatch) {
+        const resolvedUrl = this.normalizeEvergabeUrl(embeddedMatch[0]);
+        this.logger.info(
+          { originalUrl, resolvedUrl },
+          'Resolved /unterlagen/ URL from serialized rawResponse',
+        );
+        return resolvedUrl;
+      }
+    } catch {
+      // ignore serialization issues and continue fallback strategy
+    }
+
+    // Strategy 3: Extract /unterlagen/ URLs from description text
     const description = raw.shortDescription || raw.rawResponse?.tender?.description || '';
     const unterlagenMatch = description.match(
       /https?:\/\/(?:www\.)?evergabe\.de\/unterlagen\/[^\s"<>)]+/i,
     );
     if (unterlagenMatch) {
+      const resolvedUrl = this.normalizeEvergabeUrl(unterlagenMatch[0]);
       this.logger.info(
-        { originalUrl, resolvedUrl: unterlagenMatch[0] },
+        { originalUrl, resolvedUrl },
         'Resolved /unterlagen/ URL from tender description text',
       );
-      return unterlagenMatch[0];
+      return resolvedUrl;
     }
 
-    // Strategy 3: Fall back to original URL
+    // Strategy 4: Fall back to original URL
     if (originalUrl.includes('/auftraege/')) {
       this.logger.warn(
         { originalUrl },
@@ -212,10 +252,93 @@ export class EvergabeDeService extends BaseScraperService {
     };
   }
 
-  protected async downloadDocuments(documentsUrl: string, destDir: string): Promise<DownloadResult> {
-    this.logger.info({ documentsUrl, destDir }, 'Downloading documents from evergabe.de (production)');
+  override async processDiscoveredTender(tender: any): Promise<void> {
+    await super.processDiscoveredTender(tender);
 
-    return this.downloader.discoverAndDownloadFromPage(documentsUrl, destDir, {
+    try {
+      const docsDir = await this.outputManager.ensureDocumentsDir(this.portalName, tender.id);
+      const existing = fs.readdirSync(docsDir).filter((name) => {
+        const fullPath = path.join(docsDir, name);
+        return fs.statSync(fullPath).isFile() && fs.statSync(fullPath).size > 0;
+      });
+
+      if (existing.length > 0) {
+        return;
+      }
+
+      const fallbackResult = await this.saveEvergabeNoticeFallback(tender, docsDir);
+      if (fallbackResult.downloaded.length > 0) {
+        this.logger.info(
+          { tenderId: tender.id, files: fallbackResult.downloaded },
+          'evergabe.de: stored notice fallback file because no downloadable attachments were accessible',
+        );
+      }
+    } catch (error: any) {
+      this.logger.warn(
+        { tenderId: tender.id, error: error.message },
+        'evergabe.de: failed to write notice fallback after download attempts',
+      );
+    }
+  }
+
+  private async saveEvergabeNoticeFallback(tender: any, destDir: string): Promise<DownloadResult> {
+    const downloaded: string[] = [];
+    const failed: string[] = [];
+    const skipped: string[] = [];
+
+    try {
+      const release = tender?.rawResponse ?? {};
+      const title = release?.tender?.title || tender?.title || 'evergabe notice';
+      const description = release?.tender?.description || tender?.shortDescription || '';
+      const sourceUrl = this.resolveDocumentsUrl(tender);
+
+      const noticeTextPath = path.join(destDir, 'notice_de.txt');
+      const noticeJsonPath = path.join(destDir, 'notice_raw.json');
+
+      const noticeText = [
+        `Titel: ${title}`,
+        sourceUrl ? `Quelle: ${sourceUrl}` : '',
+        '',
+        description,
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      if (noticeText.trim()) {
+        if (fs.existsSync(noticeTextPath) && fs.statSync(noticeTextPath).size > 0) {
+          skipped.push(noticeTextPath);
+        } else {
+          fs.writeFileSync(noticeTextPath, noticeText, 'utf8');
+          downloaded.push(noticeTextPath);
+        }
+      }
+
+      const serialized = JSON.stringify(release, null, 2);
+      if (serialized && serialized !== '{}') {
+        if (fs.existsSync(noticeJsonPath) && fs.statSync(noticeJsonPath).size > 0) {
+          skipped.push(noticeJsonPath);
+        } else {
+          fs.writeFileSync(noticeJsonPath, serialized, 'utf8');
+          downloaded.push(noticeJsonPath);
+        }
+      }
+
+      if (downloaded.length === 0 && skipped.length === 0) {
+        failed.push(sourceUrl || tender?.documentsUrl || String(tender?.id || 'unknown'));
+      }
+    } catch (error: any) {
+      this.logger.warn({ tenderId: tender?.id, error: error.message }, 'evergabe.de: failed to save notice fallback');
+      failed.push(tender?.documentsUrl || String(tender?.id || 'unknown'));
+    }
+
+    return { downloaded, failed, skipped };
+  }
+
+  protected async downloadDocuments(documentsUrl: string, destDir: string): Promise<DownloadResult> {
+    const normalizedUrl = this.normalizeEvergabeUrl(documentsUrl);
+    this.logger.info({ documentsUrl, normalizedUrl, destDir }, 'Downloading documents from evergabe.de (production)');
+
+    return this.downloader.discoverAndDownloadFromPage(normalizedUrl, destDir, {
       timeout: 20000,
       maxRetries: 2,
     });
