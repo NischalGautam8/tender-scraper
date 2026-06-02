@@ -132,6 +132,27 @@ export class DocumentDownloaderService {
       filename = filename.replace(/[/\\?%*:|"<>\s]/g, '_');
 
       let destPath = path.join(destDir, filename);
+
+      // Check if file already exists with non-zero size (idempotency check)
+      if (fs.existsSync(destPath) && fs.statSync(destPath).size > 0) {
+        this.logger.info({ filename }, 'File already exists with non-zero size; skipping download (idempotency)');
+        return destPath;
+      }
+
+      // If preferred filename has no extension, check for sibling with extension
+      if (!path.extname(filename)) {
+        const sibling = fs.readdirSync(destDir).find((name) =>
+          name.startsWith(`${filename}.`) || name.startsWith(`${filename}-`),
+        );
+        if (sibling) {
+          const siblingPath = path.join(destDir, sibling);
+          if (fs.statSync(siblingPath).size > 0) {
+            this.logger.info({ filename, sibling }, 'Sibling file already exists; skipping download (idempotency)');
+            return siblingPath;
+          }
+        }
+      }
+
       const ext = path.extname(filename);
       const base = path.basename(filename, ext);
       let counter = 1;
@@ -687,82 +708,333 @@ export class DocumentDownloaderService {
 
     // Special handling for evergabe.de (Vergabemarktplatz)
     if (host.includes('evergabe.de') && !host.includes('deutsche-evergabe.de')) {
-      // Fast-path: most OCDS links end with /zustellweg-auswaehlen, while the actual
-      // public documents table is available directly at /unterlagen/<id>.
-      const canonicalDocsUrl = pageUrl.replace(/\/zustellweg-auswaehlen\/?$/i, '');
-
-      if (canonicalDocsUrl !== pageUrl) {
-        this.logger.info({ pageUrl, canonicalDocsUrl }, 'evergabe.de: trying canonical documents page first');
+      // Pre-step: if we received an /auftraege/ URL (search/listing page) instead of
+      // /unterlagen/ (documents page), try to scrape the listing page for the actual
+      // documents link first.
+      if (pageUrl.includes('/auftraege/') && !pageUrl.includes('/unterlagen/')) {
+        this.logger.info({ pageUrl }, 'evergabe.de: received /auftraege/ URL; scraping for /unterlagen/ link');
         try {
-          const canonicalHtml = await this.httpClient.getText(canonicalDocsUrl, {
+          const listingHtml = await this.httpClient.getText(pageUrl, {
             ...options,
             timeout: options.timeout ?? 20000,
           });
-          const $canon = cheerio.load(canonicalHtml);
-          const refs: DocumentRef[] = [];
-          const seenCanon = new Set<string>();
+          const $listing = cheerio.load(listingHtml);
 
-          $canon('a[href*="/download-url/"], a[href*="/portal/files/download"]').each((_i, el) => {
-            const href = $canon(el).attr('href');
+          // Look for links pointing to /unterlagen/ pages
+          let unterlagenUrl: string | null = null;
+          $listing('a[href*="/unterlagen/"]').each((_i, el) => {
+            const href = $listing(el).attr('href');
             if (!href) return;
             try {
-              const absoluteUrl = new URL(href, canonicalDocsUrl).toString();
-              if (seenCanon.has(absoluteUrl)) return;
-              seenCanon.add(absoluteUrl);
-
-              const rowText = $canon(el).closest('tr').text();
-              const filenameMatch = rowText.match(/([^\s\\/:*?"<>|]+\.(?:pdf|zip|docx?|xlsx?|pptx?|xml|csv|txt|rtf))/i);
-              refs.push({
-                url: absoluteUrl,
-                filename: filenameMatch ? filenameMatch[1] : undefined,
-              });
-            } catch {
-              // Skip invalid absolute URL resolution
-            }
+              const absoluteUrl = href.startsWith('http')
+                ? href
+                : new URL(href, pageUrl).toString();
+              if (absoluteUrl.includes('evergabe.de') && absoluteUrl.includes('/unterlagen/')) {
+                unterlagenUrl = absoluteUrl;
+                return false; // break out of .each()
+              }
+            } catch { /* skip */ }
           });
 
-          if (refs.length > 0) {
-            this.logger.info({ count: refs.length, canonicalDocsUrl }, 'evergabe.de: found download-url links on canonical page');
-            return this.downloadAllDocuments(refs, destDir, options);
+          // Also scan the page text for /unterlagen/ URLs embedded in descriptions
+          if (!unterlagenUrl) {
+            const pageText = $listing.text();
+            const textMatch = pageText.match(
+              /https?:\/\/(?:www\.)?evergabe\.de\/unterlagen\/[^\s"<>)]+/i,
+            );
+            if (textMatch) {
+              unterlagenUrl = textMatch[0];
+            }
           }
-        } catch (canonErr: any) {
-          this.logger.debug({ error: canonErr.message }, 'evergabe.de canonical-page extraction failed; falling back to Playwright');
+
+          if (unterlagenUrl) {
+            this.logger.info(
+              { originalUrl: pageUrl, resolvedUrl: unterlagenUrl },
+              'evergabe.de: resolved /unterlagen/ URL from /auftraege/ listing page; redirecting',
+            );
+            // Recursively call with the proper documents URL
+            return this.discoverAndDownloadFromPage(unterlagenUrl, destDir, options);
+          }
+
+          this.logger.warn(
+            { pageUrl },
+            'evergabe.de: could not find /unterlagen/ link on /auftraege/ page; will try download anyway',
+          );
+        } catch (listingErr: any) {
+          this.logger.warn(
+            { pageUrl, error: listingErr.message },
+            'evergabe.de: failed to scrape /auftraege/ page for /unterlagen/ links',
+          );
         }
       }
 
+      // Fast-path: strip /zustellweg-auswaehlen suffix to get the actual documents page URL.
+      const canonicalDocsUrl = pageUrl.replace(/\/zustellweg-auswaehlen\/?$/i, '');
+
+      // Guard: skip bare /unterlagen or /unterlagen/ URLs without a tender ID
+      {
+        const unterlagenPath = new URL(canonicalDocsUrl).pathname.replace(/\/+$/, '');
+        if (unterlagenPath === '/unterlagen' || unterlagenPath === '') {
+          this.logger.warn({ pageUrl }, 'evergabe.de: bare /unterlagen URL without tender ID; skipping');
+          return { downloaded: [], failed: [pageUrl], skipped: [] };
+        }
+      }
+
+      // Strategy A: Try static HTML fetch for the documents page.
+      // This avoids Playwright entirely — evergabe.de aggressively blocks automated
+      // browsers ("Access Denied!") but often serves download links via static HTML.
+      this.logger.info({ canonicalDocsUrl }, 'evergabe.de: trying static HTML fetch for documents page');
+      try {
+        const staticHtml = await this.httpClient.getText(canonicalDocsUrl, {
+          ...options,
+          timeout: options.timeout ?? 20000,
+        });
+        const $static = cheerio.load(staticHtml);
+        const refs: DocumentRef[] = [];
+        const seenStatic = new Set<string>();
+
+        // Look for direct download links
+        // evergabe.de currently uses multiple patterns, including:
+        // - /download-url/
+        // - /portal/files/download
+        // - /unterlagen/{internalId}/download/{fileId}
+        $static('a[href*="/download-url/"], a[href*="/portal/files/download"], a[href*="/unterlagen/"][href*="/download/"]').each((_i, el) => {
+          const href = $static(el).attr('href');
+          if (!href) return;
+          try {
+            const absoluteUrl = new URL(href, canonicalDocsUrl).toString();
+            if (seenStatic.has(absoluteUrl)) return;
+            seenStatic.add(absoluteUrl);
+
+            const rowText = $static(el).closest('tr').text();
+            const filenameMatch = rowText.match(/([^\s\\/:*?"<>|]+\.(?:pdf|zip|docx?|xlsx?|pptx?|xml|csv|txt|rtf))/i);
+            refs.push({
+              url: absoluteUrl,
+              filename: filenameMatch ? filenameMatch[1] : undefined,
+            });
+          } catch {
+            // Skip invalid absolute URL resolution
+          }
+        });
+
+        // Also look for standard file extension links
+        $static('a[href]').each((_i, el) => {
+          const href = $static(el).attr('href');
+          if (!href) return;
+          let cleanHref = href;
+          const semiIdx = cleanHref.indexOf(';');
+          if (semiIdx !== -1) cleanHref = cleanHref.substring(0, semiIdx);
+          const ext = path.extname(cleanHref).toLowerCase();
+          const hrefLower = cleanHref.toLowerCase();
+          const isEvergabeDownloadUrl =
+            hrefLower.includes('/download-url/') ||
+            hrefLower.includes('/portal/files/download') ||
+            (hrefLower.includes('/unterlagen/') && hrefLower.includes('/download/'));
+
+          if (DOC_EXTENSIONS.has(ext) || isEvergabeDownloadUrl) {
+            try {
+              const absoluteUrl = new URL(href, canonicalDocsUrl).toString();
+              if (seenStatic.has(absoluteUrl)) return;
+              seenStatic.add(absoluteUrl);
+              const rowText = $static(el).closest('tr').text();
+              const filenameMatch = rowText.match(/([^\s\\/:*?"<>|]+\.(?:pdf|zip|docx?|xlsx?|pptx?|xml|csv|txt|rtf))/i);
+              refs.push({
+                url: absoluteUrl,
+                filename: filenameMatch ? filenameMatch[1] : $static(el).text().trim() || undefined,
+              });
+            } catch { /* skip */ }
+          }
+        });
+
+        if (refs.length > 0) {
+          this.logger.info({ count: refs.length, canonicalDocsUrl }, 'evergabe.de: found download links via static HTML');
+          return this.downloadAllDocuments(refs, destDir, options);
+        }
+
+        // If we got HTML but no download links, check if the page is a zustellweg-auswaehlen
+        // page that contains a link to the actual documents page
+        let redirectUrl: string | null = null;
+        $static('a[href*="/unterlagen/"]').each((_i, el) => {
+          const href = $static(el).attr('href');
+          if (!href || redirectUrl) return;
+          const text = $static(el).text().toLowerCase();
+          if (text.includes('vergabeunterlagen') || text.includes('ansehen') || text.includes('dokument')) {
+            try {
+              redirectUrl = new URL(href, canonicalDocsUrl).toString();
+            } catch { /* skip */ }
+          }
+        });
+
+        if (redirectUrl && redirectUrl !== canonicalDocsUrl && redirectUrl !== pageUrl) {
+          this.logger.info({ redirectUrl, canonicalDocsUrl }, 'evergabe.de: found redirect to documents page in static HTML');
+          try {
+            const redirectHtml = await this.httpClient.getText(redirectUrl, {
+              ...options,
+              timeout: options.timeout ?? 20000,
+            });
+            const $redir = cheerio.load(redirectHtml);
+            const redirRefs: DocumentRef[] = [];
+            const seenRedir = new Set<string>();
+
+            $redir('a[href*="/download-url/"], a[href*="/portal/files/download"], a[href*="/unterlagen/"][href*="/download/"]').each((_i, el) => {
+              const href = $redir(el).attr('href');
+              if (!href) return;
+              try {
+                const absoluteUrl = new URL(href, redirectUrl!).toString();
+                if (seenRedir.has(absoluteUrl)) return;
+                seenRedir.add(absoluteUrl);
+                const rowText = $redir(el).closest('tr').text();
+                const filenameMatch = rowText.match(/([^\s\\/:*?"<>|]+\.(?:pdf|zip|docx?|xlsx?|pptx?|xml|csv|txt|rtf))/i);
+                redirRefs.push({
+                  url: absoluteUrl,
+                  filename: filenameMatch ? filenameMatch[1] : undefined,
+                });
+              } catch { /* skip */ }
+            });
+
+            $redir('a[href]').each((_i, el) => {
+              const href = $redir(el).attr('href');
+              if (!href) return;
+              let cleanHref = href;
+              const semiIdx = cleanHref.indexOf(';');
+              if (semiIdx !== -1) cleanHref = cleanHref.substring(0, semiIdx);
+              const ext = path.extname(cleanHref).toLowerCase();
+              const hrefLower = cleanHref.toLowerCase();
+              const isEvergabeDownloadUrl =
+                hrefLower.includes('/download-url/') ||
+                hrefLower.includes('/portal/files/download') ||
+                (hrefLower.includes('/unterlagen/') && hrefLower.includes('/download/'));
+
+              if (DOC_EXTENSIONS.has(ext) || isEvergabeDownloadUrl) {
+                try {
+                  const absoluteUrl = new URL(href, redirectUrl!).toString();
+                  if (seenRedir.has(absoluteUrl)) return;
+                  seenRedir.add(absoluteUrl);
+                  redirRefs.push({ url: absoluteUrl, filename: $redir(el).text().trim() || undefined });
+                } catch { /* skip */ }
+              }
+            });
+
+            if (redirRefs.length > 0) {
+              this.logger.info({ count: redirRefs.length, redirectUrl }, 'evergabe.de: found download links on redirected page');
+              return this.downloadAllDocuments(redirRefs, destDir, options);
+            }
+          } catch (redirErr: any) {
+            this.logger.debug({ redirectUrl, error: redirErr.message }, 'evergabe.de: redirect page fetch failed');
+          }
+        }
+
+        this.logger.info({ canonicalDocsUrl }, 'evergabe.de: no download links found in static HTML; falling back to Playwright');
+      } catch (staticErr: any) {
+        this.logger.debug({ error: staticErr.message, canonicalDocsUrl }, 'evergabe.de: static HTML fetch failed; falling back to Playwright');
+      }
+
+      // Strategy B: Playwright fallback — add a throttle delay to reduce rate-limiting risk
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
       this.logger.info({ pageUrl }, 'Handling evergabe.de portal via Playwright');
       let context: any;
-    let page: any;
+      let page: any;
       try {
         const result = await this.browserPool.acquirePage(pageUrl);
         context = result.context;
         page = result.page;
 
         this.logger.info('Handling evergabe.de access/download flow');
-        // Wait for page to fully render
-        await page.waitForTimeout(4000);
+
+        // Wait for page to fully render — evergabe.de is JS-heavy and may redirect
+        try {
+          await page.waitForLoadState('networkidle', { timeout: 15000 });
+        } catch {
+          // networkidle may time out on pages with persistent connections
+          await page.waitForTimeout(5000);
+        }
+        await page.waitForTimeout(2000);
         await this.dismissKnownCookieOverlays(page);
 
-        // If we are on the "zustellweg-auswaehlen" page, click the actionable
-        // "Vergabeunterlagen ansehen" button/link (not just the heading text).
-        try {
+        const currentUrl = page.url();
+        this.logger.info({ currentUrl, pageUrl }, 'evergabe.de: page loaded');
+
+        // If we are on the "zustellweg-auswaehlen" page, we need to select anonymous
+        // access before documents become visible.
+        if (currentUrl.includes('/zustellweg-auswaehlen') || pageUrl.includes('/zustellweg-auswaehlen')) {
+          this.logger.info('evergabe.de: on zustellweg-auswaehlen page; attempting anonymous access');
+
           const anonymousAccessSelectors = [
+            // Primary button
             'a.btn.btn-primary[href*="/unterlagen/"]:has-text("Vergabeunterlagen ansehen")',
+            'a.btn[href*="/unterlagen/"]:has-text("Vergabeunterlagen")',
+            // Links with relevant text
             'a[href*="/unterlagen/"]:has-text("Vergabeunterlagen ansehen")',
+            'a[href*="/unterlagen/"]:has-text("Vergabeunterlagen")',
             'a:has-text("Vergabeunterlagen ansehen")',
+            'a:has-text("Vergabeunterlagen")',
+            // Anonymous/guest access options
+            'a:has-text("Ohne Registrierung fortfahren")',
+            'a:has-text("Anonym herunterladen")',
+            'a:has-text("Gastzugang")',
+            'button:has-text("Vergabeunterlagen ansehen")',
+            'button:has-text("Vergabeunterlagen")',
+            // Radio or option for anonymous access, then submit
+            'input[value="anonymous"]',
+            'input[name*="zustellweg"][value*="anonym"]',
           ];
 
+          let clickedAccess = false;
           for (const selector of anonymousAccessSelectors) {
+            try {
+              if (await page.locator(selector).count() > 0) {
+                this.logger.info({ selector }, 'evergabe.de: clicking anonymous access element');
+                await page.locator(selector).last().click({ timeout: 10000 });
+                clickedAccess = true;
+                break;
+              }
+            } catch (selErr: any) {
+              this.logger.debug({ selector, error: selErr.message }, 'evergabe.de: selector click failed');
+            }
+          }
+
+          if (clickedAccess) {
+            // Wait for the documents page to load after clicking
+            try {
+              await page.waitForLoadState('networkidle', { timeout: 15000 });
+            } catch {
+              await page.waitForTimeout(5000);
+            }
+            await page.waitForTimeout(2000);
+            await this.dismissKnownCookieOverlays(page);
+            this.logger.info({ url: page.url() }, 'evergabe.de: navigated after anonymous access click');
+          } else {
+            this.logger.warn('evergabe.de: no anonymous access element found on zustellweg page');
+          }
+        }
+
+        // Also try handling the anonymous access button if it appears on the documents page itself
+        try {
+          const docPageAccessSelectors = [
+            'a:has-text("Vergabeunterlagen ansehen")',
+            'a:has-text("Vergabeunterlagen")',
+          ];
+          for (const selector of docPageAccessSelectors) {
             if (await page.locator(selector).count() > 0) {
-              this.logger.info({ selector }, 'evergabe.de: opening anonymous documents page');
-              await page.locator(selector).last().click({ timeout: 10000 });
-              await page.waitForTimeout(3500);
-              await this.dismissKnownCookieOverlays(page);
-              break;
+              const href = await page.locator(selector).last().getAttribute('href');
+              // Only click if this leads to a different page (not just an anchor)
+              if (href && href.includes('/unterlagen/') && !href.startsWith('#')) {
+                this.logger.info({ selector }, 'evergabe.de: found documents access link on current page');
+                await page.locator(selector).last().click({ timeout: 10000 });
+                try {
+                  await page.waitForLoadState('networkidle', { timeout: 15000 });
+                } catch {
+                  await page.waitForTimeout(5000);
+                }
+                await page.waitForTimeout(2000);
+                await this.dismissKnownCookieOverlays(page);
+                break;
+              }
             }
           }
         } catch (flowErr: any) {
-          this.logger.debug({ error: flowErr.message }, 'evergabe.de: could not click anonymous access button');
+          this.logger.debug({ error: flowErr.message }, 'evergabe.de: could not click documents access button');
         }
 
         // Step 3: Click the download button which initiates the file download
@@ -772,6 +1044,9 @@ export class DocumentDownloaderService {
           'a:has-text("Herunterladen")',
           'a:has-text("Download")',
           'button:has-text("Download")',
+          'a[href*="/download-url/"]',
+          'a[href*="/portal/files/download"]',
+          'a[href*="/unterlagen/"][href*="/download/"]',
           'a[href*=".zip"]',
           'a[href*=".pdf"]',
           'a[download]',
@@ -817,7 +1092,8 @@ export class DocumentDownloaderService {
           const hrefLower = cleanHref.toLowerCase();
           const isEvergabeDownloadUrl =
             hrefLower.includes('/download-url/') ||
-            hrefLower.includes('/portal/files/download');
+            hrefLower.includes('/portal/files/download') ||
+            (hrefLower.includes('/unterlagen/') && hrefLower.includes('/download/'));
 
           if (DOC_EXTENSIONS.has(ext) || isEvergabeDownloadUrl) {
             try {
@@ -848,6 +1124,14 @@ export class DocumentDownloaderService {
           this.logger.info({ count: evRefs.length }, 'Found document links in rendered evergabe.de page');
           return this.downloadAllDocuments(evRefs, destDir, options);
         }
+
+        // Diagnostic: log page state on failure for debugging
+        const failTitle = await page.title().catch(() => 'unknown');
+        const failUrl = page.url();
+        this.logger.warn(
+          { failUrl, failTitle, pageUrl },
+          'evergabe.de: no download links found after all strategies; page may require login or has no public documents',
+        );
       } catch (err: any) {
         this.logger.warn({ error: err.message }, 'Failed during evergabe.de Playwright handling');
       } finally {

@@ -30,7 +30,7 @@ export class CloudflareBypassService {
       await page.goto('https://udbud.dk/', { waitUntil: 'networkidle' });
       await page.waitForTimeout(4000);
 
-      const cookies = await context.cookies();
+      const cookies = await context.cookies('https://udbud.dk');
       this.cookiesStr = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
       this.cookieExpiry = now + 20 * 60 * 1000; // valid for 20 mins
 

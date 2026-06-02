@@ -73,7 +73,68 @@ export class EvergabeDeService extends BaseScraperService {
     }
   }
 
+  /**
+   * Resolve the best documents URL for an evergabe.de tender.
+   *
+   * The OCDS API sometimes provides URLs pointing to search listing pages
+   * (/auftraege/suche-ueber-vergabestellen/...) instead of the actual
+   * documents page (/unterlagen/...). This method tries multiple strategies
+   * to find the correct /unterlagen/ URL:
+   *
+   * 1. Scan OCDS rawResponse.tender.documents[] for /unterlagen/ URLs
+   * 2. Extract /unterlagen/ URLs from the tender description text
+   * 3. Fall back to the original URL
+   */
+  private resolveDocumentsUrl(raw: any): string {
+    const originalUrl: string = raw.documentsUrl || raw.portalUrl || '';
+
+    // If the URL already points to /unterlagen/, it's fine
+    if (originalUrl.includes('/unterlagen/')) {
+      return originalUrl;
+    }
+
+    // Strategy 1: Scan OCDS rawResponse.tender.documents[] for /unterlagen/ URLs
+    const rawDocs = raw.rawResponse?.tender?.documents;
+    if (Array.isArray(rawDocs)) {
+      for (const doc of rawDocs) {
+        const url = doc?.url;
+        if (typeof url === 'string' && url.includes('evergabe.de') && url.includes('/unterlagen/')) {
+          this.logger.info(
+            { originalUrl, resolvedUrl: url },
+            'Resolved /unterlagen/ URL from OCDS documents array',
+          );
+          return url;
+        }
+      }
+    }
+
+    // Strategy 2: Extract /unterlagen/ URLs from description text
+    const description = raw.shortDescription || raw.rawResponse?.tender?.description || '';
+    const unterlagenMatch = description.match(
+      /https?:\/\/(?:www\.)?evergabe\.de\/unterlagen\/[^\s"<>)]+/i,
+    );
+    if (unterlagenMatch) {
+      this.logger.info(
+        { originalUrl, resolvedUrl: unterlagenMatch[0] },
+        'Resolved /unterlagen/ URL from tender description text',
+      );
+      return unterlagenMatch[0];
+    }
+
+    // Strategy 3: Fall back to original URL
+    if (originalUrl.includes('/auftraege/')) {
+      this.logger.warn(
+        { originalUrl },
+        'Could not resolve /unterlagen/ URL; documentsUrl points to a search/listing page which may not contain download links',
+      );
+    }
+
+    return originalUrl;
+  }
+
   protected async mapToProcurement(raw: any): Promise<CreateProcurementInput> {
+    const documentsUrl = this.resolveDocumentsUrl(raw);
+
     return {
       sourceArray: [
         {
@@ -94,7 +155,7 @@ export class EvergabeDeService extends BaseScraperService {
           : null,
         cpvCodeArray: [],
         languageCodeArray: ['de'],
-        documentsUrl: raw.documentsUrl,
+        documentsUrl,
         portalUrl: raw.portalUrl,
         submissionUrl: null,
         canBidOnIndividualLots: false,

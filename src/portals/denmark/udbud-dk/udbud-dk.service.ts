@@ -209,10 +209,19 @@ export class UdbudDkService extends BaseScraperService {
 
       for (const link of candidateLinks.slice(0, 12)) {
         try {
+          let linkCookies: string | undefined;
+          try {
+            const linkUrl = new URL(link);
+            if (linkUrl.hostname.includes('udbud.dk')) {
+              linkCookies = cookies;
+            }
+          } catch {
+            // ignore URL parse error
+          }
           const result = await this.downloader.discoverAndDownloadFromPage(link, destDir, {
             timeout: 25000,
             maxRetries: 2,
-            cookies,
+            cookies: linkCookies,
           });
           aggregate.downloaded.push(...result.downloaded);
           aggregate.failed.push(...result.failed);

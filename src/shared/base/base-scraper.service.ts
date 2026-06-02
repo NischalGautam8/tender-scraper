@@ -95,11 +95,29 @@ export abstract class BaseScraperService {
 
     const shouldSkipOcdsDocUrl = (url: string): boolean => {
       try {
-        const host = new URL(url).hostname.toLowerCase();
+        const parsed = new URL(url);
+        const host = parsed.hostname.toLowerCase();
+        const pathname = parsed.pathname.toLowerCase();
+
         // Guardrail: some sources embed large sets of non-procurement legal/media links
         // (e.g. CURIA multilingual press-release PDFs) that create noisy 404 downloads.
         if (host === 'curia.europa.eu' || host.endsWith('.curia.europa.eu')) {
           return true;
+        }
+
+        // Guardrail: evergabe.de portal page URLs are NOT direct file downloads.
+        // They are HTML pages (/auftraege/, /unterlagen/, /zustellweg-auswaehlen)
+        // that require Playwright/scraping and are handled by the portal-specific
+        // downloadDocuments flow. Trying to download them as files causes 418 errors.
+        if (host === 'evergabe.de' || host === 'www.evergabe.de') {
+          if (
+            pathname.includes('/auftraege/') ||
+            pathname.includes('/unterlagen/') ||
+            pathname.includes('/ausschreibungen/') ||
+            pathname.includes('/zustellweg-auswaehlen')
+          ) {
+            return true;
+          }
         }
       } catch {
         // ignore parse errors and let normal flow handle it
