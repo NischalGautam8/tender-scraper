@@ -1,4 +1,4 @@
-# 🏗️ EU Tender Portal Scraper (BOND Assessment)
+# 🏗️ EU Tender Portal Scraper 
 
 A NestJS-based enterprise-grade EU procurement tender scraper and document downloader designed to bypass anti-bot WAFs (Cloudflare & WebSphere) across 12 portals (9 German portals, 2 Tier A foreign portals [Udbud.dk 🇩🇰, TenderNed 🇳🇱] and 1 Tier C foreign portal [PLACSP 🇪🇸]).
 
